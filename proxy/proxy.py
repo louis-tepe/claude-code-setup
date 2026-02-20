@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Claude Code Proxy — GLM-5 Router (v2)
+Claude Code Proxy — GLM-5 Router (v3)
 
 Routes Claude Code requests by model tier:
 - Opus → Anthropic (OAuth passthrough)
@@ -10,6 +10,11 @@ Key design: Claude Code keeps native model names (claude-sonnet-4-6, etc.)
 for correct capability detection. The proxy rewrites to glm-5 only when
 forwarding to Z.AI. For Anthropic fallbacks (web_search, vision), no
 rewrite is needed — the model name is already valid.
+
+Features:
+- Circuit breaker: auto-bypass Z.AI after repeated failures
+- Startup validation: checks API keys and provider URLs
+- Automatic fallback for unsupported features (web_search, vision, forced_tool_choice)
 """
 
 from fastapi import FastAPI, Request, Response
@@ -23,6 +28,7 @@ import logging
 import asyncio
 import random
 import uuid
+import time
 
 # ANSI colors
 GREEN = "\033[92m"
@@ -106,6 +112,98 @@ MAX_CONCURRENT_REQUESTS = int(os.getenv("MAX_CONCURRENT_REQUESTS", "5"))
 haiku_semaphore = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
 sonnet_semaphore = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
 opus_semaphore = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
+
+
+# ---------------------------------------------------------------------------
+# Startup validation
+# ---------------------------------------------------------------------------
+def validate_config():
+    """Validate provider configuration at startup."""
+    warnings = []
+    tiers = [
+        ("Haiku", HAIKU_BASE_URL, HAIKU_API_KEY),
+        ("Sonnet", SONNET_BASE_URL, SONNET_API_KEY),
+        ("Opus", OPUS_BASE_URL, OPUS_API_KEY),
+    ]
+    for name, base_url, api_key in tiers:
+        if base_url and not api_key:
+            warnings.append(f"{name}: base URL set but API key is missing")
+        if api_key and not base_url:
+            warnings.append(f"{name}: API key set but base URL is missing")
+
+    if not any(url for _, url, _ in tiers):
+        logger.info("All tiers → Anthropic OAuth (no Z.AI providers configured)")
+
+    for w in warnings:
+        logger.warning(f"{YELLOW}Config: {w}{RESET}")
+
+    return len(warnings) == 0
+
+
+# ---------------------------------------------------------------------------
+# Circuit breaker — auto-bypass Z.AI after repeated failures
+# ---------------------------------------------------------------------------
+class CircuitBreaker:
+    """
+    Tracks failures per provider. After `threshold` consecutive failures,
+    opens the circuit for `recovery_time` seconds, routing to Anthropic instead.
+    """
+
+    def __init__(
+        self,
+        threshold: int = int(os.getenv("CIRCUIT_BREAKER_THRESHOLD", "5")),
+        recovery_time: float = float(os.getenv("CIRCUIT_BREAKER_RECOVERY", "120")),
+    ):
+        self.threshold = threshold
+        self.recovery_time = recovery_time
+        self._failures: dict[str, int] = {}
+        self._opened_at: dict[str, float] = {}
+
+    def is_open(self, tier: str) -> bool:
+        """Check if circuit is open (provider should be bypassed)."""
+        if tier not in self._opened_at:
+            return False
+        elapsed = time.time() - self._opened_at[tier]
+        if elapsed >= self.recovery_time:
+            # Recovery period elapsed — close circuit (half-open → test)
+            self._failures[tier] = 0
+            del self._opened_at[tier]
+            logger.info(f"{GREEN}Circuit closed for {tier} — retrying Z.AI{RESET}")
+            return False
+        return True
+
+    def record_failure(self, tier: str):
+        """Record a failure. Opens circuit if threshold reached."""
+        self._failures[tier] = self._failures.get(tier, 0) + 1
+        if self._failures[tier] >= self.threshold and tier not in self._opened_at:
+            self._opened_at[tier] = time.time()
+            logger.warning(
+                f"{YELLOW}Circuit OPEN for {tier} — "
+                f"bypassing Z.AI for {self.recovery_time}s after "
+                f"{self._failures[tier]} failures{RESET}"
+            )
+
+    def record_success(self, tier: str):
+        """Record a success. Resets failure count."""
+        if tier in self._failures:
+            self._failures[tier] = 0
+        if tier in self._opened_at:
+            del self._opened_at[tier]
+
+    def status(self) -> dict:
+        """Return circuit status for health endpoint."""
+        result = {}
+        for tier in ("haiku", "sonnet", "opus"):
+            if self.is_open(tier):
+                remaining = self.recovery_time - (time.time() - self._opened_at[tier])
+                result[tier] = f"OPEN (bypass for {remaining:.0f}s more)"
+            else:
+                failures = self._failures.get(tier, 0)
+                result[tier] = f"CLOSED ({failures}/{self.threshold} failures)"
+        return result
+
+
+circuit_breaker = CircuitBreaker()
 
 
 # ---------------------------------------------------------------------------
@@ -366,6 +464,13 @@ async def proxy_messages(request: Request):
             is_zai_route = False
             log_route(rid, f"{original_model} {stream_tag} Anthropic ({bypass_reason} bypass)")
 
+    # ── Circuit breaker: bypass Z.AI if too many recent failures ──
+    tier = _detect_tier(original_model)
+    if provider_config and tier and circuit_breaker.is_open(tier):
+        provider_config = None
+        is_zai_route = False
+        log_warn(rid, f"{original_model} {stream_tag} Anthropic (circuit breaker open for {tier})")
+
     # ── Route to Z.AI ──
     if provider_config:
         api_key, base_url, provider_label, provider_semaphore = provider_config
@@ -424,6 +529,8 @@ async def proxy_messages(request: Request):
 
                         # Z.AI server error → fallback to Anthropic
                         if is_zai_route and ('"code":"500"' in body_str or '"code": "500"' in body_str):
+                            if tier:
+                                circuit_breaker.record_failure(tier)
                             log_warn(rid, "Z.AI server error, falling back to Anthropic")
                             fallback_headers = _build_anthropic_headers(original_headers)
                             fallback_headers["Accept"] = "text/event-stream"
@@ -444,6 +551,8 @@ async def proxy_messages(request: Request):
 
                         return Response(content=body, status_code=response.status_code, headers=strip_encoding_headers(response.headers))
 
+                    if is_zai_route and tier:
+                        circuit_breaker.record_success(tier)
                     log_ok(rid, f"Stream started ({response.status_code})")
                     return StreamingResponse(
                         safe_stream_wrapper(response.aiter_bytes(), rid, original_model),
@@ -465,6 +574,8 @@ async def proxy_messages(request: Request):
 
                         # Z.AI server error → fallback to Anthropic
                         if is_zai_route and _is_zai_server_error(response):
+                            if tier:
+                                circuit_breaker.record_failure(tier)
                             log_warn(rid, "Z.AI server error, falling back to Anthropic")
                             fallback_headers = _build_anthropic_headers(original_headers)
                             fb_response = await client.post(f"{ANTHROPIC_BASE_URL}/v1/messages", json=original_data, headers=fallback_headers)
@@ -479,6 +590,8 @@ async def proxy_messages(request: Request):
                             )
 
                     if response.status_code < 400:
+                        if is_zai_route and tier:
+                            circuit_breaker.record_success(tier)
                         log_ok(rid, f"OK ({response.status_code})")
                     return Response(
                         content=response.content,
@@ -488,6 +601,8 @@ async def proxy_messages(request: Request):
 
             except httpx.ReadTimeout:
                 log_err(rid, f"Read timeout (attempt {attempt+1}/{MAX_RETRIES})")
+                if is_zai_route and tier:
+                    circuit_breaker.record_failure(tier)
                 if attempt < MAX_RETRIES - 1:
                     await asyncio.sleep(calculate_retry_delay(attempt))
                     continue
@@ -575,6 +690,7 @@ async def health_check():
             "sonnet": "Z.AI" if SONNET_BASE_URL else "Anthropic (OAuth)",
             "haiku": "Z.AI" if HAIKU_BASE_URL else "Anthropic (OAuth)",
         },
+        "circuit_breaker": circuit_breaker.status(),
         "fallbacks": ["web_search → Anthropic", "vision/image → Anthropic"],
     }
 
@@ -585,8 +701,10 @@ async def health_check():
 if __name__ == "__main__":
     import uvicorn
 
+    validate_config()
+
     print("=" * 60)
-    print("  Claude Code Proxy — GLM-5 Router v2")
+    print("  Claude Code Proxy — GLM-5 Router v3")
     print("=" * 60)
     print()
     print("Routing (by model name substring):")
