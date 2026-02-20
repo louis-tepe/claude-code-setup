@@ -8,9 +8,32 @@
     "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1",
     "MCP_TIMEOUT": "30",
     "MCP_TOOL_TIMEOUT": "60",
-    "DISABLE_TELEMETRY": "1",
-    "DISABLE_ERROR_REPORTING": "1",
-    "CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY": "1"
+    "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": "85",
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"
+  },
+  "permissions": {
+    "deny": [
+      "Read(**/.env*)",
+      "Read(**/secrets/**)",
+      "Read(**/credentials/**)",
+      "Read(~/.ssh/**)",
+      "Bash(rm -rf /*)",
+      "Bash(curl * | *)",
+      "Bash(wget * | *)"
+    ],
+    "allow": [
+      "Bash(git status)",
+      "Bash(git diff *)",
+      "Bash(git log *)",
+      "Bash(npm run *)",
+      "Bash(npm test *)",
+      "Bash(pnpm *)",
+      "Bash(bun *)"
+    ],
+    "ask": [
+      "Bash(git push *)",
+      "Bash(npm publish *)"
+    ]
   },
   "hooks": {
     "Stop": [
