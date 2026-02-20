@@ -172,9 +172,11 @@ Tu verras les requêtes routées avec des couleurs :
 |----------|-------------|
 | `claude` | Lancer Claude Code (proxy auto-start) |
 | `cc` | Alias pour le mode sans confirmations |
-| `curl localhost:8082/health` | Vérifier le proxy |
+| `curl localhost:8082/health` | Vérifier le proxy (routing, stats, circuit breaker) |
 | `tail -f /tmp/claude-proxy.log` | Logs du proxy |
 | `~/claude-code-proxy/start-proxy.sh` | Démarrer le proxy manuellement |
+| `cd ~/claude-code-setup && ./update.sh` | Mettre à jour (pull + re-appliquer) |
+| `cd ~/claude-code-setup && ./uninstall.sh` | Tout désinstaller proprement |
 
 ---
 
@@ -206,25 +208,31 @@ claude login
 
 ### Erreurs GLM-5
 
-Le proxy gère automatiquement les erreurs Z.AI en basculant vers Anthropic. Si tu vois beaucoup de fallbacks jaunes dans les logs, c'est que Z.AI a des problèmes temporaires — ça se résout tout seul.
+Le proxy inclut un **circuit breaker** : apres 5 echecs Z.AI consecutifs, il bascule automatiquement sur Anthropic pendant 2 minutes, puis re-teste. Visible dans `/health`.
 
 ---
 
-## Désinstallation
+## Mise a jour
+
+Quand de nouvelles ameliorations sont publiees :
 
 ```bash
-# 1. Supprimer le proxy
-rm -rf ~/claude-code-proxy
-
-# 2. Retirer le bloc dans ~/.zshrc
-# Ouvre ~/.zshrc et supprime tout entre :
-#   # ==== CLAUDE CODE PROXY - GLM-5 ROUTING ====
-#   ...
-#   # ==== END CLAUDE CODE PROXY ====
-
-# 3. Restaurer la config Claude Code originale
-# Le backup est dans ~/.claude/settings.json.backup.*
+cd ~/claude-code-setup
+./update.sh
 ```
+
+Le script pull les derniers changements, met a jour le proxy et la config, et preserv ton `.env`.
+
+---
+
+## Desinstallation
+
+```bash
+cd ~/claude-code-setup
+./uninstall.sh
+```
+
+Le script supprime proprement : proxy, agents, integration shell, service auto-start, et propose de restaurer ton ancien settings.json.
 
 ---
 

@@ -184,8 +184,36 @@ if [ ! -d "$PROXY_DIR" ]; then
     cp "$SCRIPT_DIR/proxy/start-proxy.sh" "$PROXY_DIR/" || error "Failed to copy start-proxy.sh"
     chmod +x "$PROXY_DIR/start-proxy.sh"
 
-    # .env from example
-    cp "$SCRIPT_DIR/proxy/.env.example" "$PROXY_DIR/.env"
+    # .env — prompt for API key if not already set
+    if [ -f "$PROXY_DIR/.env" ]; then
+        ok "Existing .env preserved"
+    else
+        cp "$SCRIPT_DIR/proxy/.env.example" "$PROXY_DIR/.env"
+
+        # Check if API key was provided via environment variable
+        if [ -n "$ZAI_API_KEY" ]; then
+            ZAI_KEY="$ZAI_API_KEY"
+            ok "Using Z.AI API key from environment"
+        else
+            echo ""
+            info "A Z.AI API key is required for GLM-5 routing."
+            echo "  Get one at: https://z.ai/subscribe"
+            echo ""
+            read -p "  Enter your Z.AI API key: " ZAI_KEY
+            echo
+        fi
+
+        if [ -n "$ZAI_KEY" ]; then
+            if [ "$PLATFORM" = "macos" ]; then
+                sed -i '' "s|your-zai-api-key-here|$ZAI_KEY|g" "$PROXY_DIR/.env"
+            else
+                sed -i "s|your-zai-api-key-here|$ZAI_KEY|g" "$PROXY_DIR/.env"
+            fi
+            ok "API key configured"
+        else
+            warn "No API key provided. Edit ~/claude-code-proxy/.env before using the proxy."
+        fi
+    fi
     ok "Proxy files copied to $PROXY_DIR"
 
     # Create venv and install dependencies
@@ -289,6 +317,44 @@ fi
 echo ""
 
 # ------------------------------------------------------------------------------
+# Auto-start service (optional)
+# ------------------------------------------------------------------------------
+echo ""
+read -p "Install auto-start service (proxy starts on boot)? (y/N) " -n 1 -r
+echo
+if [[ $REPLY =~ ^[Yy]$ ]]; then
+    if [ "$PLATFORM" = "macos" ]; then
+        PLIST_DIR="$HOME/Library/LaunchAgents"
+        PLIST_FILE="$PLIST_DIR/com.claude-code.proxy.plist"
+        mkdir -p "$PLIST_DIR"
+        cp "$SCRIPT_DIR/service/com.claude-code.proxy.plist" "$PLIST_FILE"
+        # Replace placeholders with actual paths
+        sed -i '' "s|VENV_PYTHON_PLACEHOLDER|$PROXY_DIR/venv/bin/python|g" "$PLIST_FILE"
+        sed -i '' "s|PROXY_PY_PLACEHOLDER|$PROXY_DIR/proxy.py|g" "$PLIST_FILE"
+        sed -i '' "s|PROXY_DIR_PLACEHOLDER|$PROXY_DIR|g" "$PLIST_FILE"
+        launchctl load "$PLIST_FILE" 2>/dev/null
+        ok "launchd service installed — proxy will start on boot"
+    elif [ "$PLATFORM" = "linux" ]; then
+        SYSTEMD_DIR="$HOME/.config/systemd/user"
+        UNIT_FILE="$SYSTEMD_DIR/claude-code-proxy.service"
+        mkdir -p "$SYSTEMD_DIR"
+        cp "$SCRIPT_DIR/service/claude-code-proxy.service" "$UNIT_FILE"
+        # Replace placeholders with actual paths
+        sed -i "s|VENV_PYTHON_PLACEHOLDER|$PROXY_DIR/venv/bin/python|g" "$UNIT_FILE"
+        sed -i "s|PROXY_PY_PLACEHOLDER|$PROXY_DIR/proxy.py|g" "$UNIT_FILE"
+        sed -i "s|PROXY_DIR_PLACEHOLDER|$PROXY_DIR|g" "$UNIT_FILE"
+        systemctl --user daemon-reload
+        systemctl --user enable claude-code-proxy
+        systemctl --user start claude-code-proxy
+        ok "systemd service installed — proxy will start on boot"
+    fi
+else
+    info "Skipping auto-start service (proxy starts via shell function)"
+fi
+
+echo ""
+
+# ------------------------------------------------------------------------------
 # Plugins
 # ------------------------------------------------------------------------------
 info "Plugins to install (run these commands manually):"
@@ -302,7 +368,7 @@ echo "  claude plugins:install frontend-design@claude-plugins-official"
 echo ""
 
 # ------------------------------------------------------------------------------
-# Test
+# Test proxy + Z.AI connection
 # ------------------------------------------------------------------------------
 info "Testing proxy..."
 
@@ -337,6 +403,33 @@ for tier, dest in d['routing'].items():
     else
         warn "Proxy started but health check failed"
     fi
+
+    # Test Z.AI connection
+    echo ""
+    info "Testing Z.AI connection..."
+    ZAI_TEST=$(curl -s -X POST http://localhost:8082/v1/messages \
+        -H "Content-Type: application/json" \
+        -H "x-api-key: test" \
+        -H "anthropic-version: 2023-06-01" \
+        -d '{"model":"claude-haiku-4-5-20251001","max_tokens":10,"messages":[{"role":"user","content":"Say hi"}]}' \
+        2>/dev/null)
+
+    if echo "$ZAI_TEST" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+if d.get('type') == 'message' or 'content' in d:
+    print('ok')
+elif 'error' in d:
+    print('error: ' + str(d['error']))
+else:
+    print('unknown')
+" 2>/dev/null | grep -q "ok"; then
+        ok "Z.AI GLM-5 connection working!"
+    else
+        warn "Z.AI connection test failed. Check your API key in ~/claude-code-proxy/.env"
+        echo "  You can test manually: curl http://localhost:8082/health"
+    fi
+
     # Stop test proxy
     kill $PROXY_PID 2>/dev/null
 else

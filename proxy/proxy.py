@@ -207,6 +207,63 @@ circuit_breaker = CircuitBreaker()
 
 
 # ---------------------------------------------------------------------------
+# Request stats — in-memory tracking
+# ---------------------------------------------------------------------------
+class ProxyStats:
+    """Track request count, errors, and latency per tier."""
+
+    def __init__(self):
+        self._started_at = time.time()
+        self._requests: dict[str, int] = {}
+        self._errors: dict[str, int] = {}
+        self._latencies: dict[str, list[float]] = {}
+        self._fallbacks: int = 0
+        self._lock = asyncio.Lock()
+
+    async def record(self, tier: str, latency: float, is_error: bool = False, is_fallback: bool = False):
+        async with self._lock:
+            self._requests[tier] = self._requests.get(tier, 0) + 1
+            if is_error:
+                self._errors[tier] = self._errors.get(tier, 0) + 1
+            if is_fallback:
+                self._fallbacks += 1
+            # Keep last 100 latencies per tier
+            if tier not in self._latencies:
+                self._latencies[tier] = []
+            self._latencies[tier].append(latency)
+            if len(self._latencies[tier]) > 100:
+                self._latencies[tier] = self._latencies[tier][-100:]
+
+    def summary(self) -> dict:
+        uptime = time.time() - self._started_at
+        hours = int(uptime // 3600)
+        minutes = int((uptime % 3600) // 60)
+
+        tiers = {}
+        for tier in ("haiku", "sonnet", "opus", "anthropic"):
+            req = self._requests.get(tier, 0)
+            err = self._errors.get(tier, 0)
+            lats = self._latencies.get(tier, [])
+            avg_lat = sum(lats) / len(lats) if lats else 0
+            tiers[tier] = {
+                "requests": req,
+                "errors": err,
+                "avg_latency_ms": round(avg_lat * 1000),
+            }
+
+        return {
+            "uptime": f"{hours}h{minutes:02d}m",
+            "total_requests": sum(self._requests.values()),
+            "total_errors": sum(self._errors.values()),
+            "fallbacks_to_anthropic": self._fallbacks,
+            "per_tier": tiers,
+        }
+
+
+stats = ProxyStats()
+
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 def short_id() -> str:
@@ -503,6 +560,8 @@ async def proxy_messages(request: Request):
     # ── Execute request with retries ──
     client = request.app.state.http_client
     sem = provider_semaphore if provider_semaphore else asyncio.Semaphore(9999)
+    stats_tier = tier if is_zai_route and tier else "anthropic"
+    request_start = time.time()
 
     async with sem:
         for attempt in range(MAX_RETRIES):
@@ -531,6 +590,7 @@ async def proxy_messages(request: Request):
                         if is_zai_route and ('"code":"500"' in body_str or '"code": "500"' in body_str):
                             if tier:
                                 circuit_breaker.record_failure(tier)
+                            await stats.record(stats_tier, time.time() - request_start, is_error=True, is_fallback=True)
                             log_warn(rid, "Z.AI server error, falling back to Anthropic")
                             fallback_headers = _build_anthropic_headers(original_headers)
                             fallback_headers["Accept"] = "text/event-stream"
@@ -553,6 +613,7 @@ async def proxy_messages(request: Request):
 
                     if is_zai_route and tier:
                         circuit_breaker.record_success(tier)
+                    await stats.record(stats_tier, time.time() - request_start)
                     log_ok(rid, f"Stream started ({response.status_code})")
                     return StreamingResponse(
                         safe_stream_wrapper(response.aiter_bytes(), rid, original_model),
@@ -576,6 +637,7 @@ async def proxy_messages(request: Request):
                         if is_zai_route and _is_zai_server_error(response):
                             if tier:
                                 circuit_breaker.record_failure(tier)
+                            await stats.record(stats_tier, time.time() - request_start, is_error=True, is_fallback=True)
                             log_warn(rid, "Z.AI server error, falling back to Anthropic")
                             fallback_headers = _build_anthropic_headers(original_headers)
                             fb_response = await client.post(f"{ANTHROPIC_BASE_URL}/v1/messages", json=original_data, headers=fallback_headers)
@@ -592,7 +654,10 @@ async def proxy_messages(request: Request):
                     if response.status_code < 400:
                         if is_zai_route and tier:
                             circuit_breaker.record_success(tier)
+                        await stats.record(stats_tier, time.time() - request_start)
                         log_ok(rid, f"OK ({response.status_code})")
+                    else:
+                        await stats.record(stats_tier, time.time() - request_start, is_error=True)
                     return Response(
                         content=response.content,
                         status_code=response.status_code,
@@ -691,6 +756,7 @@ async def health_check():
             "haiku": "Z.AI" if HAIKU_BASE_URL else "Anthropic (OAuth)",
         },
         "circuit_breaker": circuit_breaker.status(),
+        "stats": stats.summary(),
         "fallbacks": ["web_search → Anthropic", "vision/image → Anthropic"],
     }
 

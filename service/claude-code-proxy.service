@@ -1,0 +1,15 @@
+[Unit]
+Description=Claude Code GLM-5 Proxy
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=PROXY_DIR_PLACEHOLDER
+ExecStart=VENV_PYTHON_PLACEHOLDER PROXY_PY_PLACEHOLDER
+Restart=on-failure
+RestartSec=5
+StandardOutput=append:/tmp/claude-proxy.log
+StandardError=append:/tmp/claude-proxy.log
+
+[Install]
+WantedBy=default.target

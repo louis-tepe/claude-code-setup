@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.claude-code.proxy</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>VENV_PYTHON_PLACEHOLDER</string>
+        <string>PROXY_PY_PLACEHOLDER</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>PROXY_DIR_PLACEHOLDER</string>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/tmp/claude-proxy.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/claude-proxy.log</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/usr/local/bin:/usr/bin:/bin</string>
+    </dict>
+</dict>
+</plist>
