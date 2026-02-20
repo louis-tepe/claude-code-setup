@@ -1,5 +1,6 @@
 ---
 name: magic-docs
+description: Documentation agent for fetching and analyzing web content and docs
 model: sonnet
 disallowedTools:
   - Task

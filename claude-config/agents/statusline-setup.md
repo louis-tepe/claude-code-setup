@@ -1,5 +1,6 @@
 ---
 name: statusline-setup
+description: Configure the Claude Code status line setting
 model: sonnet
 allowedTools:
   - Read

@@ -1,5 +1,6 @@
 ---
 name: Plan
+description: Software architect agent for designing implementation plans and strategies
 model: opus
 disallowedTools:
   - Task

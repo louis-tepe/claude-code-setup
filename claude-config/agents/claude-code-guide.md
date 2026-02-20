@@ -1,5 +1,6 @@
 ---
 name: claude-code-guide
+description: Guide for Claude Code features, hooks, slash commands, MCP servers, and settings
 model: sonnet
 disallowedTools:
   - Task

@@ -1,5 +1,6 @@
 ---
 name: Explore
+description: Fast agent for exploring codebases, searching files, and answering architecture questions
 model: sonnet
 disallowedTools:
   - Task

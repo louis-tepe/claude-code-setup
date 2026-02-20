@@ -1,5 +1,6 @@
 ---
 name: Bash
+description: Command execution specialist for running bash commands
 model: sonnet
 allowedTools:
   - Bash
