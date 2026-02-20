@@ -1,0 +1,6 @@
+---
+name: general-purpose
+model: sonnet
+---
+
+General-purpose agent for researching complex questions, searching for code, and executing multi-step tasks.
