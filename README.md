@@ -1,91 +1,98 @@
 # Claude Code Setup — GLM-5 Proxy
 
-Configuration Claude Code optimisee avec routage intelligent :
-- **Opus 4.6** (abonnement Claude Max) comme agent principal / cerveau
-- **GLM-5** (Zhipu AI / Z.AI) comme workers / subagents (remplace Sonnet et Haiku)
+> Utilise Claude Code comme un pro : **Opus 4.6** comme cerveau principal + **GLM-5** comme workers pour les sous-tâches. Résultat : un agent IA puissant sans exploser les limites hebdomadaires de ton abonnement Claude.
 
-## Pre-requis
+## Comment ça marche ?
 
-- **macOS** (le script utilise `afplay`, `lsof`, `brew`)
-- **Python 3.9+** avec pip
-- **jq** (`brew install jq`)
-- **Claude Code** installe et connecte (`claude login`)
-- **Abonnement Claude Max** (pour Opus 4.6)
+Claude Code utilise 3 niveaux de modèles :
+- **Opus** — l'agent principal, celui qui réfléchit et orchestre (le plus intelligent)
+- **Sonnet** — les sous-agents qui exécutent les tâches (recherche, exploration, etc.)
+- **Haiku** — les micro-tâches rapides (résumés, validations)
 
-## Installation
+Le problème : tout passe par Anthropic, et tu peux vite atteindre les limites hebdomadaires.
+
+**La solution** : un proxy local qui redirige Sonnet et Haiku vers GLM-5 (modèle chinois de Zhipu AI, gratuit via Z.AI), tout en gardant Opus sur ton abonnement Claude Max.
+
+```
+Claude Code
+    |
+localhost:8082
+    |
+[Proxy local]
+    |
+    |--- Opus ---------> Anthropic (ton abonnement Max)
+    |--- Sonnet -------> Z.AI GLM-5 (gratuit)
+    |--- Haiku --------> Z.AI GLM-5 (gratuit)
+```
+
+Les features incompatibles avec GLM-5 (recherche web, vision, etc.) sont automatiquement renvoyées vers Anthropic.
+
+---
+
+## Pré-requis
+
+Avant de commencer, assure-toi d'avoir :
+
+| Pré-requis | Comment vérifier | Comment installer |
+|------------|-----------------|-------------------|
+| **macOS** | Tu es sur Mac | - |
+| **Python 3.9+** | `python3 --version` | `brew install python3` |
+| **jq** | `jq --version` | `brew install jq` |
+| **Homebrew** | `brew --version` | [brew.sh](https://brew.sh) |
+| **Claude Code** | `claude --version` | `npm install -g @anthropic-ai/claude-code` |
+| **Abonnement Claude Max** | [claude.ai/settings](https://claude.ai/settings) | [claude.ai/upgrade](https://claude.ai/upgrade) |
+
+---
+
+## Installation (5 minutes)
+
+### Étape 1 — Clone le repo
 
 ```bash
-git clone <ce-repo> ~/claude-code-setup
+git clone git@github.com:louis-tepe/claude-code-setup.git ~/claude-code-setup
+```
+
+### Étape 2 — Lance l'installateur
+
+```bash
 cd ~/claude-code-setup
-chmod +x install.sh
 ./install.sh
 ```
 
-Le script installe automatiquement :
-1. Le proxy GLM-5 dans `~/claude-code-proxy/`
-2. La configuration Claude Code dans `~/.claude/`
-3. L'integration shell dans `~/.zshrc`
+Le script va :
+1. Vérifier que tu as Python, jq, etc.
+2. Installer le proxy dans `~/claude-code-proxy/` (avec son environnement Python isolé)
+3. Copier la config Claude Code (settings, agents, statusline)
+4. Ajouter l'intégration shell dans ton `~/.zshrc`
+5. Tester que le proxy fonctionne
 
-## Architecture
-
-```
-                    Claude Code
-                        |
-                  localhost:8082
-                        |
-                   [GLM-5 Proxy]
-                   /     |     \
-                  /      |      \
-           Opus 4.6   Sonnet   Haiku
-              |          |        |
-         Anthropic    Z.AI     Z.AI
-         (OAuth)     (GLM-5)  (GLM-5)
-```
-
-### Fallbacks automatiques vers Anthropic
-
-Certaines features ne sont pas supportees par Z.AI et sont automatiquement redirigees vers Anthropic :
-- `web_search` (recherche web)
-- `vision/image` (analyse d'images)
-- `forced_tool_choice` (choix d'outil force)
-- Erreurs serveur Z.AI (code 500)
-
-## Ce qui est installe
-
-### Proxy (`~/claude-code-proxy/`)
-- `proxy.py` — Proxy FastAPI avec routage intelligent
-- `.env` — Cle API Z.AI (partagee)
-- `venv/` — Environnement Python isole
-
-### Config Claude Code (`~/.claude/`)
-- `settings.json` — Config globale (env vars, hooks, plugins, statusline)
-- `statusline-command.sh` — Barre de statut personnalisee (modele, contexte, cout)
-- `agents/` — 7 agents custom (Bash, Explore, Plan, etc.)
-
-### Shell (`~/.zshrc`)
-- `ANTHROPIC_BASE_URL` pointe vers le proxy local
-- Fonction `claude()` qui demarre le proxy automatiquement
-- Alias `cc` pour le mode dangereux
-
-## Utilisation
+### Étape 3 — Recharge ton terminal
 
 ```bash
-# Lancer Claude Code (le proxy demarre automatiquement)
-claude
-
-# Verifier le proxy
-curl http://localhost:8082/health
-
-# Voir les logs du proxy
-tail -f /tmp/claude-proxy.log
-
-# Demarrer le proxy manuellement
-~/claude-code-proxy/start-proxy.sh
+source ~/.zshrc
 ```
 
-## Plugins
+### Étape 4 — Connecte-toi à Claude
 
-Apres l'installation, activez les plugins :
+```bash
+claude login
+```
+
+Connecte-toi avec ton compte Claude Max.
+
+### Étape 5 — Lance Claude Code
+
+```bash
+claude
+```
+
+C'est tout. Le proxy démarre automatiquement en arrière-plan.
+
+---
+
+## Installer les plugins (optionnel mais recommandé)
+
+Ces plugins ajoutent des fonctionnalités utiles à Claude Code :
 
 ```bash
 claude plugins:install feature-dev@claude-plugins-official
@@ -96,15 +103,133 @@ claude plugins:install hookify@claude-plugins-official
 claude plugins:install frontend-design@claude-plugins-official
 ```
 
-## Desinstallation
+---
+
+## Vérifier que tout fonctionne
+
+### Le proxy tourne ?
 
 ```bash
-# Supprimer le proxy
+curl http://localhost:8082/health
+```
+
+Tu devrais voir :
+```json
+{
+  "status": "healthy",
+  "target_model": "glm-5",
+  "routing": {
+    "opus": "Anthropic (OAuth)",
+    "sonnet": "Z.AI",
+    "haiku": "Z.AI"
+  }
+}
+```
+
+### Voir les logs en temps réel
+
+```bash
+tail -f /tmp/claude-proxy.log
+```
+
+Tu verras les requêtes routées avec des couleurs :
+- Cyan : routage (quel modèle va où)
+- Vert : requête réussie
+- Jaune : fallback vers Anthropic
+- Rouge : erreur
+
+---
+
+## Ce qui est installé
+
+```
+~/claude-code-proxy/          # Le proxy
+├── proxy.py                  # Serveur FastAPI
+├── .env                      # Clé API Z.AI
+├── start-proxy.sh            # Démarrage manuel
+└── venv/                     # Python isolé
+
+~/.claude/                    # Config Claude Code
+├── settings.json             # Réglages globaux
+├── statusline-command.sh     # Barre de statut custom
+└── agents/                   # 7 agents spécialisés
+    ├── Bash.md               # Exécution de commandes
+    ├── Explore.md            # Exploration de code
+    ├── Plan.md               # Architecture (utilise Opus)
+    ├── claude-code-guide.md  # Guide Claude Code
+    ├── general-purpose.md    # Agent polyvalent
+    ├── magic-docs.md         # Documentation
+    └── statusline-setup.md   # Config statusline
+
+~/.zshrc                      # Intégration shell ajoutée
+```
+
+---
+
+## Commandes utiles
+
+| Commande | Description |
+|----------|-------------|
+| `claude` | Lancer Claude Code (proxy auto-start) |
+| `cc` | Alias pour le mode sans confirmations |
+| `curl localhost:8082/health` | Vérifier le proxy |
+| `tail -f /tmp/claude-proxy.log` | Logs du proxy |
+| `~/claude-code-proxy/start-proxy.sh` | Démarrer le proxy manuellement |
+
+---
+
+## Dépannage
+
+### Le proxy ne démarre pas
+
+```bash
+# Vérifier si le port est utilisé
+lsof -i:8082
+
+# Regarder les logs d'erreur
+cat /tmp/claude-proxy.log
+
+# Relancer manuellement
+~/claude-code-proxy/start-proxy.sh
+```
+
+### Claude Code ne se connecte pas
+
+```bash
+# Vérifier la variable d'environnement
+echo $ANTHROPIC_BASE_URL
+# Doit afficher : http://localhost:8082
+
+# Se reconnecter
+claude login
+```
+
+### Erreurs GLM-5
+
+Le proxy gère automatiquement les erreurs Z.AI en basculant vers Anthropic. Si tu vois beaucoup de fallbacks jaunes dans les logs, c'est que Z.AI a des problèmes temporaires — ça se résout tout seul.
+
+---
+
+## Désinstallation
+
+```bash
+# 1. Supprimer le proxy
 rm -rf ~/claude-code-proxy
 
-# Retirer le bloc shell (entre les marqueurs CLAUDE CODE PROXY)
-# Editer ~/.zshrc et supprimer le bloc
+# 2. Retirer le bloc dans ~/.zshrc
+# Ouvre ~/.zshrc et supprime tout entre :
+#   # ==== CLAUDE CODE PROXY - GLM-5 ROUTING ====
+#   ...
+#   # ==== END CLAUDE CODE PROXY ====
 
-# Restaurer la config Claude Code
+# 3. Restaurer la config Claude Code originale
 # Le backup est dans ~/.claude/settings.json.backup.*
 ```
+
+---
+
+## Crédits
+
+- Proxy basé sur [jodavan/claude-code-proxy](https://github.com/jodavan/claude-code-proxy), adapté pour le routage GLM-5
+- Modèle GLM-5 par [Zhipu AI](https://z.ai)
+- [Claude Code](https://docs.anthropic.com/en/docs/claude-code) par Anthropic
