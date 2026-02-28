@@ -40,11 +40,25 @@ fi
 cost=$(echo "$input" | jq -r '.cost.total_cost_usd // 0')
 cost_fmt=$(printf "$%.4f" "$cost" 2>/dev/null || echo "\$0.00")
 
+# Routing state (read from proxy toggle file)
+routing_file="$HOME/.claude/glm-routing"
+if [ -f "$routing_file" ]; then
+    routing_state=$(cat "$routing_file" 2>/dev/null)
+    if [ "$routing_state" = "off" ]; then
+        routing_label="DIRECT"
+    else
+        routing_label="GLM-5"
+    fi
+else
+    routing_label="GLM-5"
+fi
+
 # Build output
 parts=""
 parts="${parts}${model}"
 parts="${parts} | ctx [${bar}] ${used_pct_int}% of ${ctx_k}k"
 parts="${parts} | ${cost_fmt}"
+parts="${parts} | ${routing_label}"
 
 if [ -n "$project_name" ]; then
     parts="${parts} | ${project_name}: ${display_path}"

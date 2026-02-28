@@ -82,7 +82,9 @@ async def lifespan(app: FastAPI):
     )
     app.state.http_client = httpx.AsyncClient(timeout=timeout_config, limits=limits)
     logger.info("HTTP client ready")
+    stats.start_persistence()
     yield
+    await stats.stop_persistence()
     await app.state.http_client.aclose()
 
 
@@ -101,14 +103,48 @@ OPUS_BASE_URL = os.getenv("OPUS_PROVIDER_BASE_URL")
 ANTHROPIC_BASE_URL = "https://api.anthropic.com"
 PORT = int(os.getenv("PORT", "8082"))
 
-# The model name to send to Z.AI (replaces Claude model names)
-ZAI_TARGET_MODEL = os.getenv("ZAI_TARGET_MODEL", "glm-5")
+# The model names to send to Z.AI per tier (replaces Claude model names)
+ZAI_TARGET_MODEL = os.getenv("ZAI_TARGET_MODEL", "glm-5")  # default fallback
+ZAI_SONNET_MODEL = os.getenv("ZAI_SONNET_MODEL", ZAI_TARGET_MODEL)
+ZAI_HAIKU_MODEL = os.getenv("ZAI_HAIKU_MODEL", ZAI_TARGET_MODEL)
+ZAI_OPUS_MODEL = os.getenv("ZAI_OPUS_MODEL", ZAI_TARGET_MODEL)
+
+
+def _zai_model_for_tier(tier: str) -> str:
+    """Return the Z.AI model name for a given tier."""
+    return {"opus": ZAI_OPUS_MODEL, "sonnet": ZAI_SONNET_MODEL, "haiku": ZAI_HAIKU_MODEL}.get(tier, ZAI_TARGET_MODEL)
+
+# Compatibility toggles — allow testing Z.AI support for these features
+ALLOW_FORCED_TOOL_CHOICE = os.getenv("ALLOW_FORCED_TOOL_CHOICE", "").lower() in ("1", "true", "yes")
+ZAI_PASS_CACHE_CONTROL = os.getenv("ZAI_PASS_CACHE_CONTROL", "").lower() in ("1", "true", "yes")
 
 MAX_RETRIES = int(os.getenv("MAX_RETRIES", "3"))
 BASE_RETRY_DELAY = float(os.getenv("BASE_RETRY_DELAY", "1.0"))
 MAX_RETRY_DELAY = float(os.getenv("MAX_RETRY_DELAY", "60.0"))
 
-MAX_CONCURRENT_REQUESTS = int(os.getenv("MAX_CONCURRENT_REQUESTS", "5"))
+# ---------------------------------------------------------------------------
+# Pricing — used to scale tokens so Claude Code displays correct GLM-5 cost
+# ---------------------------------------------------------------------------
+# Anthropic pricing (USD per million tokens) — what Claude Code uses internally
+ANTHROPIC_PRICING = {
+    "sonnet": {"input": 3.00, "output": 15.00},
+    "haiku":  {"input": 1.00, "output": 5.00},
+}
+# GLM-5 pricing (USD per million tokens)
+GLM5_INPUT_PRICE = float(os.getenv("GLM5_INPUT_PRICE", "1.00"))
+GLM5_OUTPUT_PRICE = float(os.getenv("GLM5_OUTPUT_PRICE", "3.20"))
+
+
+def _scale_tokens(real_tokens: int, tier: str, direction: str) -> int:
+    """Scale token count so Anthropic pricing × scaled = GLM-5 pricing × real."""
+    if tier not in ANTHROPIC_PRICING or real_tokens == 0:
+        return real_tokens
+    anthropic_price = ANTHROPIC_PRICING[tier][direction]
+    glm_price = GLM5_INPUT_PRICE if direction == "input" else GLM5_OUTPUT_PRICE
+    return max(1, round(real_tokens * glm_price / anthropic_price))
+
+
+MAX_CONCURRENT_REQUESTS = int(os.getenv("MAX_CONCURRENT_REQUESTS", "15"))
 haiku_semaphore = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
 sonnet_semaphore = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
 opus_semaphore = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
@@ -209,16 +245,77 @@ circuit_breaker = CircuitBreaker()
 # ---------------------------------------------------------------------------
 # Request stats — in-memory tracking
 # ---------------------------------------------------------------------------
+STATS_FILE = os.getenv("STATS_FILE", "/tmp/claude-proxy-stats.json")
+STATS_SAVE_INTERVAL = int(os.getenv("STATS_SAVE_INTERVAL", "60"))  # seconds
+
+
 class ProxyStats:
-    """Track request count, errors, and latency per tier."""
+    """Track request count, errors, latency, and token usage per tier.
+    Persists cumulative stats to disk periodically and restores on startup."""
 
     def __init__(self):
         self._started_at = time.time()
         self._requests: dict[str, int] = {}
         self._errors: dict[str, int] = {}
         self._latencies: dict[str, list[float]] = {}
+        self._input_tokens: dict[str, int] = {}
+        self._output_tokens: dict[str, int] = {}
         self._fallbacks: int = 0
         self._lock = asyncio.Lock()
+        self._save_task: asyncio.Task | None = None
+        self._restore()
+
+    def _restore(self):
+        """Restore cumulative stats from disk on startup."""
+        try:
+            with open(STATS_FILE, "r") as f:
+                saved = json.load(f)
+            self._requests = saved.get("requests", {})
+            self._errors = saved.get("errors", {})
+            self._input_tokens = saved.get("input_tokens", {})
+            self._output_tokens = saved.get("output_tokens", {})
+            self._fallbacks = saved.get("fallbacks", 0)
+            logger.info(f"Stats restored from {STATS_FILE}")
+        except (FileNotFoundError, json.JSONDecodeError):
+            pass
+
+    def _save_sync(self):
+        """Write cumulative stats to disk."""
+        data = {
+            "requests": self._requests,
+            "errors": self._errors,
+            "input_tokens": self._input_tokens,
+            "output_tokens": self._output_tokens,
+            "fallbacks": self._fallbacks,
+        }
+        try:
+            with open(STATS_FILE, "w") as f:
+                json.dump(data, f)
+        except OSError as e:
+            logger.warning(f"Failed to save stats: {e}")
+
+    async def _periodic_save(self):
+        """Background task: save stats every STATS_SAVE_INTERVAL seconds."""
+        while True:
+            await asyncio.sleep(STATS_SAVE_INTERVAL)
+            async with self._lock:
+                self._save_sync()
+
+    def start_persistence(self):
+        """Start the periodic save background task."""
+        self._save_task = asyncio.create_task(self._periodic_save())
+
+    async def stop_persistence(self):
+        """Stop periodic save and do a final flush."""
+        if self._save_task:
+            self._save_task.cancel()
+            try:
+                await self._save_task
+            except asyncio.CancelledError:
+                pass
+        async with self._lock:
+            self._save_sync()
+        logger.info(f"Stats saved to {STATS_FILE}")
 
     async def record(self, tier: str, latency: float, is_error: bool = False, is_fallback: bool = False):
         async with self._lock:
@@ -227,12 +324,24 @@ class ProxyStats:
                 self._errors[tier] = self._errors.get(tier, 0) + 1
             if is_fallback:
                 self._fallbacks += 1
-            # Keep last 100 latencies per tier
+            # Keep last 100 latencies per tier (not persisted)
             if tier not in self._latencies:
                 self._latencies[tier] = []
             self._latencies[tier].append(latency)
             if len(self._latencies[tier]) > 100:
                 self._latencies[tier] = self._latencies[tier][-100:]
+
+    async def record_tokens(self, tier: str, input_tokens: int, output_tokens: int):
+        async with self._lock:
+            self._input_tokens[tier] = self._input_tokens.get(tier, 0) + input_tokens
+            self._output_tokens[tier] = self._output_tokens.get(tier, 0) + output_tokens
+
+    def _fmt_tokens(self, n: int) -> str:
+        if n >= 1_000_000:
+            return f"{n / 1_000_000:.1f}M"
+        if n >= 1_000:
+            return f"{n / 1_000:.1f}k"
+        return str(n)
 
     def summary(self) -> dict:
         uptime = time.time() - self._started_at
@@ -245,17 +354,29 @@ class ProxyStats:
             err = self._errors.get(tier, 0)
             lats = self._latencies.get(tier, [])
             avg_lat = sum(lats) / len(lats) if lats else 0
+            inp = self._input_tokens.get(tier, 0)
+            out = self._output_tokens.get(tier, 0)
             tiers[tier] = {
                 "requests": req,
                 "errors": err,
                 "avg_latency_ms": round(avg_lat * 1000),
+                "input_tokens": inp,
+                "output_tokens": out,
+                "total_tokens": self._fmt_tokens(inp + out),
             }
 
+        total_inp = sum(self._input_tokens.values())
+        total_out = sum(self._output_tokens.values())
         return {
             "uptime": f"{hours}h{minutes:02d}m",
             "total_requests": sum(self._requests.values()),
             "total_errors": sum(self._errors.values()),
             "fallbacks_to_anthropic": self._fallbacks,
+            "total_tokens": {
+                "input": total_inp,
+                "output": total_out,
+                "total": self._fmt_tokens(total_inp + total_out),
+            },
             "per_tier": tiers,
         }
 
@@ -327,11 +448,16 @@ def strip_encoding_headers(headers) -> dict:
 # ---------------------------------------------------------------------------
 # Incompatibility detection (triggers Anthropic fallback)
 # ---------------------------------------------------------------------------
-def _has_web_search(data: dict) -> bool:
+def _has_server_web_tools(data: dict) -> str | None:
+    """Check for Anthropic server web tools (web_search, web_fetch). Returns bypass reason or None."""
     for tool in data.get("tools", []):
-        if isinstance(tool, dict) and str(tool.get("type", "")).startswith("web_search"):
-            return True
-    return False
+        if isinstance(tool, dict):
+            tool_type = str(tool.get("type", ""))
+            if tool_type.startswith("web_search"):
+                return "web_search"
+            if tool_type.startswith("web_fetch"):
+                return "web_fetch"
+    return None
 
 
 def _has_image_content(data: dict) -> bool:
@@ -352,8 +478,21 @@ def _has_image_content(data: dict) -> bool:
     return False
 
 
+def _has_document_content(data: dict) -> bool:
+    """Check if any message contains document content blocks (PDF, etc.)."""
+    for msg in data.get("messages", []):
+        if not isinstance(msg, dict):
+            continue
+        content = msg.get("content")
+        if isinstance(content, list):
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "document":
+                    return True
+    return False
+
+
 def _has_forced_tool_choice(data: dict) -> bool:
-    """Check if request uses forced tool_choice (not 'auto') — Z.AI only supports 'auto'."""
+    """Check if request uses non-auto tool_choice — Z.AI only supports 'auto'."""
     tc = data.get("tool_choice")
     if isinstance(tc, dict):
         return tc.get("type", "") not in ("auto", "")
@@ -370,32 +509,54 @@ def sanitize_for_zai(data: dict, rid: str) -> dict:
     removed = []
 
     # Remove unsupported top-level parameters
-    for key in ["metadata", "prompt_caching", "service_tier", "context_management", "output_config"]:
+    for key in ["metadata", "prompt_caching", "service_tier", "context_management",
+                 "output_config", "inference_geo", "container", "citations",
+                 "betas", "effort", "speed", "mcp_servers"]:
         if key in data:
             data.pop(key)
             removed.append(key)
 
-    # Thinking: strip budget_tokens (Z.AI supports thinking.type but not budget)
+    # Thinking: normalize for Z.AI compatibility
+    # - Z.AI supports {type: "enabled"} but not {type: "adaptive"} (Opus/Sonnet 4.6+)
+    # - Z.AI doesn't support budget_tokens
     if "thinking" in data and isinstance(data["thinking"], dict):
-        if "budget_tokens" in data["thinking"]:
-            data["thinking"].pop("budget_tokens")
+        thinking = data["thinking"]
+        if thinking.get("type") == "adaptive":
+            thinking["type"] = "enabled"
+            removed.append("thinking.adaptive→enabled")
+        if "budget_tokens" in thinking:
+            thinking.pop("budget_tokens")
             removed.append("thinking.budget_tokens")
+        if "effort" in thinking:
+            thinking.pop("effort")
+            removed.append("thinking.effort")
 
     # Remove extended_thinking (Anthropic-only legacy)
     if "extended_thinking" in data:
         data.pop("extended_thinking")
         removed.append("extended_thinking")
 
-    # Strip web_search tools (handled by bypass, but double-safe)
+    # Strip Anthropic server tools and tool search tools (bypass handles most, double-safe)
+    _server_tool_prefixes = ("web_search", "web_fetch", "tool_search_tool")
     if "tools" in data and isinstance(data["tools"], list):
         original_count = len(data["tools"])
         data["tools"] = [
             t for t in data["tools"]
-            if not (isinstance(t, dict) and str(t.get("type", "")).startswith("web_search"))
+            if not (isinstance(t, dict) and str(t.get("type", "")).startswith(_server_tool_prefixes))
         ]
         stripped = original_count - len(data["tools"])
         if stripped:
-            removed.append(f"web_search(x{stripped})")
+            removed.append(f"server_tools(x{stripped})")
+        # Strip advanced tool-use fields unsupported by Z.AI
+        tool_fields_stripped = 0
+        for tool in data["tools"]:
+            if isinstance(tool, dict):
+                for key in ("defer_loading", "allowed_callers", "input_examples"):
+                    if key in tool:
+                        tool.pop(key)
+                        tool_fields_stripped += 1
+        if tool_fields_stripped:
+            removed.append(f"tool_fields(x{tool_fields_stripped})")
         if not data["tools"]:
             data.pop("tools")
             removed.append("tools(empty)")
@@ -403,19 +564,73 @@ def sanitize_for_zai(data: dict, rid: str) -> dict:
                 data.pop("tool_choice")
                 removed.append("tool_choice")
         elif isinstance(data.get("tool_choice"), dict):
-            if data["tool_choice"].get("name") == "web_search":
+            tc_name = data["tool_choice"].get("name", "")
+            if tc_name in ("web_search", "web_fetch"):
                 data.pop("tool_choice")
-                removed.append("tool_choice(web_search)")
+                removed.append(f"tool_choice({tc_name})")
 
-    # Strip cache_control everywhere (Z.AI has automatic caching)
-    cache_cleaned = _strip_cache_control(data)
-    if cache_cleaned:
-        removed.append(f"cache_control(x{cache_cleaned})")
+    # Strip Anthropic-specific blocks from message history
+    # (thinking with signature, server tool blocks unknown to Z.AI, citations on text)
+    blocks_stripped, citations_stripped = _strip_anthropic_blocks(data)
+    if blocks_stripped:
+        removed.append(f"anthropic_blocks(x{blocks_stripped})")
+    if citations_stripped:
+        removed.append(f"block_citations(x{citations_stripped})")
+
+    # Strip cache_control unless passthrough is enabled
+    if not ZAI_PASS_CACHE_CONTROL:
+        cache_cleaned = _strip_cache_control(data)
+        if cache_cleaned:
+            removed.append(f"cache_control(x{cache_cleaned})")
 
     if removed:
-        logger.debug(f"[{rid}] Sanitized: {', '.join(removed)}")
+        logger.info(f"[{rid}] Sanitized: {', '.join(removed)}")
 
     return data
+
+
+# Anthropic-specific content block types to strip from message history
+_ANTHROPIC_ONLY_BLOCKS = frozenset({
+    "thinking", "redacted_thinking",                  # thinking signature breaks Z.AI
+    "server_tool_use",                                 # Anthropic server-side tool call
+    "web_search_tool_result", "web_fetch_tool_result", # server tool results
+})
+
+
+def _strip_anthropic_blocks(data: dict) -> tuple[int, int]:
+    """Remove Anthropic-specific content blocks from assistant messages.
+
+    Strips: thinking/redacted_thinking (signature breaks Z.AI),
+    server_tool_use, web_search_tool_result, web_fetch_tool_result
+    (Anthropic server-side tool blocks unknown to Z.AI).
+    Also strips `citations` arrays from text blocks in history.
+
+    Returns (blocks_removed, citations_removed).
+    """
+    blocks_removed = 0
+    citations_removed = 0
+    for msg in data.get("messages", []):
+        if not isinstance(msg, dict) or msg.get("role") != "assistant":
+            continue
+        content = msg.get("content")
+        if not isinstance(content, list):
+            continue
+        original_len = len(content)
+        new_content = []
+        for block in content:
+            if isinstance(block, dict) and block.get("type") in _ANTHROPIC_ONLY_BLOCKS:
+                continue  # strip entire block
+            # Strip citations from text blocks (Anthropic-only field)
+            if isinstance(block, dict) and "citations" in block:
+                block.pop("citations")
+                citations_removed += 1
+            new_content.append(block)
+        msg["content"] = new_content
+        blocks_removed += original_len - len(msg["content"])
+        # If all blocks were stripped, keep at least an empty text block
+        if not msg["content"]:
+            msg["content"] = [{"type": "text", "text": ""}]
+    return blocks_removed, citations_removed
 
 
 def _strip_cache_control(data: dict) -> int:
@@ -455,41 +670,148 @@ def _strip_cache_control(data: dict) -> int:
 # ---------------------------------------------------------------------------
 # Streaming wrapper
 # ---------------------------------------------------------------------------
-async def safe_stream_wrapper(stream, rid: str, label: str):
+def _extract_tokens_from_response(content: bytes) -> tuple[int, int]:
+    """Extract input/output tokens from a non-streaming Anthropic API response."""
+    try:
+        body = json.loads(content)
+        usage = body.get("usage", {})
+        return usage.get("input_tokens", 0), usage.get("output_tokens", 0)
+    except (json.JSONDecodeError, AttributeError):
+        return 0, 0
+
+
+def _scale_response_usage(content: bytes, tier: str) -> bytes:
+    """Rewrite usage tokens in a non-streaming response for correct cost display."""
+    try:
+        body = json.loads(content)
+        usage = body.get("usage")
+        if not isinstance(usage, dict):
+            return content
+        if "input_tokens" in usage:
+            usage["input_tokens"] = _scale_tokens(usage["input_tokens"], tier, "input")
+        if "output_tokens" in usage:
+            usage["output_tokens"] = _scale_tokens(usage["output_tokens"], tier, "output")
+        for cache_key in ("cache_creation_input_tokens", "cache_read_input_tokens"):
+            if usage.get(cache_key, 0):
+                usage[cache_key] = _scale_tokens(usage[cache_key], tier, "input")
+        return json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode()
+    except (json.JSONDecodeError, AttributeError):
+        return content
+
+
+async def safe_stream_wrapper(
+    stream, rid: str, label: str,
+    stats_tier: str | None = None,
+    price_tier: str | None = None,
+    start_time: float | None = None,
+):
+    """Yield SSE events, extracting token stats and optionally scaling usage for pricing.
+
+    Args:
+        stats_tier: tier name for token accounting (real tokens)
+        price_tier: tier name for price scaling (rewrites usage in events)
+        start_time: request start timestamp for duration logging
+    """
+    buffer = b""
+    input_tokens = 0
+    output_tokens = 0
+    needs_processing = stats_tier is not None or price_tier is not None
+
     try:
         async for chunk in stream:
-            yield chunk
+            if not needs_processing:
+                yield chunk
+                continue
+
+            buffer += chunk
+            # Process complete SSE events (delimited by \n\n)
+            while b"\n\n" in buffer:
+                event_bytes, _, buffer = buffer.partition(b"\n\n")
+                event_out = event_bytes  # default: unmodified
+
+                # Only parse events that might contain usage data
+                if b"message_start" in event_bytes or b"message_delta" in event_bytes:
+                    lines = event_bytes.split(b"\n")
+                    new_lines = []
+                    modified = False
+                    for line in lines:
+                        if not line.startswith(b"data: "):
+                            new_lines.append(line)
+                            continue
+                        try:
+                            data = json.loads(line[6:])
+                            evt_type = data.get("type")
+                            if evt_type == "message_start":
+                                usage = data.get("message", {}).get("usage", {})
+                                real_in = usage.get("input_tokens", 0)
+                                input_tokens += real_in
+                                if price_tier and real_in:
+                                    usage["input_tokens"] = _scale_tokens(real_in, price_tier, "input")
+                                    # Also scale cache tokens if present
+                                    for cache_key in ("cache_creation_input_tokens", "cache_read_input_tokens"):
+                                        if usage.get(cache_key, 0):
+                                            usage[cache_key] = _scale_tokens(usage[cache_key], price_tier, "input")
+                                    modified = True
+                            elif evt_type == "message_delta":
+                                usage = data.get("usage", {})
+                                real_out = usage.get("output_tokens", 0)
+                                output_tokens += real_out
+                                if price_tier and real_out:
+                                    usage["output_tokens"] = _scale_tokens(real_out, price_tier, "output")
+                                    modified = True
+                            if modified:
+                                new_lines.append(b"data: " + json.dumps(data, ensure_ascii=False, separators=(",", ":")).encode())
+                            else:
+                                new_lines.append(line)
+                        except (json.JSONDecodeError, AttributeError):
+                            new_lines.append(line)
+                    if modified:
+                        event_out = b"\n".join(new_lines)
+
+                yield event_out + b"\n\n"
+
+        # Yield any remaining partial data
+        if buffer:
+            yield buffer
+
     except httpx.ReadTimeout:
         log_err(rid, f"Mid-stream timeout: {label}")
     except httpx.NetworkError as e:
         log_err(rid, f"Mid-stream network error: {label} - {e}")
     except Exception as e:
         log_err(rid, f"Mid-stream error: {label} - {type(e).__name__}: {e}")
+    finally:
+        if stats_tier and (input_tokens or output_tokens):
+            await stats.record_tokens(stats_tier, input_tokens, output_tokens)
+        elapsed = f" ({time.time() - start_time:.1f}s)" if start_time else ""
+        fmt = stats._fmt_tokens  # reuse compact formatter
+        if input_tokens or output_tokens:
+            log_ok(rid, f"Done {fmt(input_tokens)} in / {fmt(output_tokens)} out{elapsed}")
+        elif start_time:
+            log_ok(rid, f"Done{elapsed}")
 
 
 # ---------------------------------------------------------------------------
 # Main proxy endpoint
 # ---------------------------------------------------------------------------
-def _is_zai_server_error(response) -> bool:
-    """Detect Z.AI internal server errors disguised as 400 (code 500 inside body)."""
-    if response.status_code in (400, 500, 502, 503):
-        try:
-            body = response.text if hasattr(response, 'text') else response.content.decode(errors='replace')
-            return '"code":"500"' in body or '"code": "500"' in body
-        except Exception:
-            pass
+def _is_zai_server_error_status(status_code: int, body_str: str = "") -> bool:
+    """Detect Z.AI server errors that should trigger Anthropic fallback.
+
+    Triggers on:
+    - Any HTTP 5xx (real server error)
+    - HTTP 400 with "code":"500" in body (Z.AI disguised error)
+    """
+    if status_code >= 500:
+        return True
+    if status_code == 400 and ('"code":"500"' in body_str or '"code": "500"' in body_str):
+        return True
     return False
 
 
 def _build_anthropic_headers(original_headers: dict) -> dict:
-    """Build headers for Anthropic OAuth passthrough."""
-    headers = {"Content-Type": "application/json"}
-    if "authorization" in original_headers:
-        headers["Authorization"] = original_headers["authorization"]
-    for h in ["anthropic-version", "anthropic-beta", "x-api-key"]:
-        if h in original_headers:
-            headers[h] = original_headers[h]
-    return headers
+    """Pass through all headers to Anthropic, stripping only hop-by-hop headers."""
+    skip = {"host", "content-length", "transfer-encoding", "connection"}
+    return {k: v for k, v in original_headers.items() if k.lower() not in skip}
 
 
 @app.post("/v1/messages")
@@ -500,20 +822,23 @@ async def proxy_messages(request: Request):
     is_streaming = data.get("stream", False)
     original_headers = dict(request.headers)
     stream_tag = "⇄" if is_streaming else "→"
-    # Keep a clean copy for Anthropic fallback (before Z.AI sanitization)
-    original_data = json.loads(json.dumps(data, default=str))
+    original_data = None  # Lazy: only copied when needed for Z.AI fallback
 
     provider_config = get_provider_config(original_model)
     is_zai_route = provider_config is not None
+    bypass_reason = None
 
     # ── Anthropic fallback for incompatible features ──
     if provider_config:
         bypass_reason = None
-        if _has_web_search(data):
-            bypass_reason = "web_search"
+        web_reason = _has_server_web_tools(data)
+        if web_reason:
+            bypass_reason = web_reason
         elif _has_image_content(data):
             bypass_reason = "vision/image"
-        elif _has_forced_tool_choice(data):
+        elif _has_document_content(data):
+            bypass_reason = "document/pdf"
+        elif not ALLOW_FORCED_TOOL_CHOICE and _has_forced_tool_choice(data):
             bypass_reason = "forced_tool_choice"
 
         if bypass_reason:
@@ -523,7 +848,8 @@ async def proxy_messages(request: Request):
 
     # ── Circuit breaker: bypass Z.AI if too many recent failures ──
     tier = _detect_tier(original_model)
-    if provider_config and tier and circuit_breaker.is_open(tier):
+    circuit_breaker_open = provider_config and tier and circuit_breaker.is_open(tier)
+    if circuit_breaker_open:
         provider_config = None
         is_zai_route = False
         log_warn(rid, f"{original_model} {stream_tag} Anthropic (circuit breaker open for {tier})")
@@ -541,12 +867,15 @@ async def proxy_messages(request: Request):
         if "anthropic-version" in original_headers:
             target_headers["anthropic-version"] = original_headers["anthropic-version"]
 
-        # Rewrite model name to GLM-5 for Z.AI
-        data["model"] = ZAI_TARGET_MODEL
+        # Keep clean copy for Anthropic fallback before mutating
+        original_data = json.loads(json.dumps(data, default=str))
+        # Rewrite model name to the tier-specific Z.AI model
+        zai_model = _zai_model_for_tier(tier)
+        data["model"] = zai_model
         # Sanitize Anthropic-specific parameters
         data = sanitize_for_zai(data, rid)
 
-        log_route(rid, f"{original_model} {stream_tag} {provider_label} (model→{ZAI_TARGET_MODEL})")
+        log_route(rid, f"{original_model} {stream_tag} {provider_label} (model→{zai_model})")
 
     # ── Route to Anthropic (OAuth passthrough) ──
     else:
@@ -554,17 +883,22 @@ async def proxy_messages(request: Request):
         target_url = f"{ANTHROPIC_BASE_URL}/v1/messages"
         target_headers = _build_anthropic_headers(original_headers)
 
-        auth_method = "OAuth" if "authorization" in original_headers else "API-Key"
-        log_route(rid, f"{original_model} {stream_tag} Anthropic ({auth_method})")
+        # Only log if not already logged by bypass/circuit-breaker above
+        if not bypass_reason and not circuit_breaker_open:
+            auth_method = "OAuth" if "authorization" in original_headers else "API-Key"
+            log_route(rid, f"{original_model} {stream_tag} Anthropic ({auth_method})")
 
-    # ── Execute request with retries ──
+    # ── Execute request ──
+    # Only retry on Z.AI routes — Anthropic SDK handles its own retries
     client = request.app.state.http_client
     sem = provider_semaphore if provider_semaphore else asyncio.Semaphore(9999)
     stats_tier = tier if is_zai_route and tier else "anthropic"
+    price_tier = tier if is_zai_route and tier else None  # Scale pricing only for Z.AI routes
+    max_attempts = MAX_RETRIES if is_zai_route else 1
     request_start = time.time()
 
     async with sem:
-        for attempt in range(MAX_RETRIES):
+        for attempt in range(max_attempts):
             try:
                 if is_streaming:
                     target_headers["Accept"] = "text/event-stream"
@@ -587,7 +921,7 @@ async def proxy_messages(request: Request):
                         log_err(rid, f"Stream error {response.status_code}: {body_str[:500]}")
 
                         # Z.AI server error → fallback to Anthropic
-                        if is_zai_route and ('"code":"500"' in body_str or '"code": "500"' in body_str):
+                        if is_zai_route and _is_zai_server_error_status(response.status_code, body_str):
                             if tier:
                                 circuit_breaker.record_failure(tier)
                             await stats.record(stats_tier, time.time() - request_start, is_error=True, is_fallback=True)
@@ -599,7 +933,7 @@ async def proxy_messages(request: Request):
                             if fb_response.status_code < 400:
                                 log_ok(rid, f"Anthropic fallback OK ({fb_response.status_code})")
                                 return StreamingResponse(
-                                    safe_stream_wrapper(fb_response.aiter_bytes(), rid, original_model),
+                                    safe_stream_wrapper(fb_response.aiter_bytes(), rid, original_model, stats_tier="anthropic", start_time=request_start),
                                     media_type="text/event-stream",
                                     background=BackgroundTask(fb_response.aclose),
                                 )
@@ -616,7 +950,7 @@ async def proxy_messages(request: Request):
                     await stats.record(stats_tier, time.time() - request_start)
                     log_ok(rid, f"Stream started ({response.status_code})")
                     return StreamingResponse(
-                        safe_stream_wrapper(response.aiter_bytes(), rid, original_model),
+                        safe_stream_wrapper(response.aiter_bytes(), rid, original_model, stats_tier=stats_tier, price_tier=price_tier, start_time=request_start),
                         media_type="text/event-stream",
                         background=BackgroundTask(response.aclose),
                     )
@@ -634,7 +968,7 @@ async def proxy_messages(request: Request):
                         log_err(rid, f"HTTP {response.status_code}: {response.text[:500]}")
 
                         # Z.AI server error → fallback to Anthropic
-                        if is_zai_route and _is_zai_server_error(response):
+                        if is_zai_route and _is_zai_server_error_status(response.status_code, response.text[:1000]):
                             if tier:
                                 circuit_breaker.record_failure(tier)
                             await stats.record(stats_tier, time.time() - request_start, is_error=True, is_fallback=True)
@@ -643,6 +977,9 @@ async def proxy_messages(request: Request):
                             fb_response = await client.post(f"{ANTHROPIC_BASE_URL}/v1/messages", json=original_data, headers=fallback_headers)
                             if fb_response.status_code < 400:
                                 log_ok(rid, f"Anthropic fallback OK ({fb_response.status_code})")
+                                inp, out = _extract_tokens_from_response(fb_response.content)
+                                if inp or out:
+                                    await stats.record_tokens("anthropic", inp, out)
                             else:
                                 log_err(rid, f"Anthropic fallback also failed: {fb_response.status_code}")
                             return Response(
@@ -654,12 +991,23 @@ async def proxy_messages(request: Request):
                     if response.status_code < 400:
                         if is_zai_route and tier:
                             circuit_breaker.record_success(tier)
-                        await stats.record(stats_tier, time.time() - request_start)
-                        log_ok(rid, f"OK ({response.status_code})")
+                        elapsed = time.time() - request_start
+                        await stats.record(stats_tier, elapsed)
+                        inp, out = _extract_tokens_from_response(response.content)
+                        if inp or out:
+                            await stats.record_tokens(stats_tier, inp, out)
+                            fmt = stats._fmt_tokens
+                            log_ok(rid, f"OK {fmt(inp)} in / {fmt(out)} out ({elapsed:.1f}s)")
+                        else:
+                            log_ok(rid, f"OK ({elapsed:.1f}s)")
                     else:
                         await stats.record(stats_tier, time.time() - request_start, is_error=True)
+                    # Scale tokens in non-streaming response for correct cost display
+                    resp_content = response.content
+                    if price_tier and response.status_code < 400:
+                        resp_content = _scale_response_usage(resp_content, price_tier)
                     return Response(
-                        content=response.content,
+                        content=resp_content,
                         status_code=response.status_code,
                         headers=strip_encoding_headers(response.headers),
                     )
@@ -716,14 +1064,7 @@ async def proxy_count_tokens(request: Request):
 
     # Always forward to Anthropic for token counting
     target_url = f"{ANTHROPIC_BASE_URL}/v1/messages/count_tokens"
-    target_headers = {"Content-Type": "application/json"}
-
-    if "authorization" in original_headers:
-        target_headers["Authorization"] = original_headers["authorization"]
-
-    for header in ["anthropic-version", "anthropic-beta", "x-api-key"]:
-        if header in original_headers:
-            target_headers[header] = original_headers[header]
+    target_headers = _build_anthropic_headers(original_headers)
 
     log_route(rid, f"count_tokens {original_model} → Anthropic")
 
@@ -749,16 +1090,116 @@ async def proxy_count_tokens(request: Request):
 async def health_check():
     return {
         "status": "healthy",
-        "target_model": ZAI_TARGET_MODEL,
+        "models": {
+            "opus": ZAI_OPUS_MODEL if OPUS_BASE_URL else None,
+            "sonnet": ZAI_SONNET_MODEL if SONNET_BASE_URL else None,
+            "haiku": ZAI_HAIKU_MODEL if HAIKU_BASE_URL else None,
+        },
         "routing": {
-            "opus": "Z.AI" if OPUS_BASE_URL else "Anthropic (OAuth)",
-            "sonnet": "Z.AI" if SONNET_BASE_URL else "Anthropic (OAuth)",
-            "haiku": "Z.AI" if HAIKU_BASE_URL else "Anthropic (OAuth)",
+            "opus": f"Z.AI ({ZAI_OPUS_MODEL})" if OPUS_BASE_URL else "Anthropic (OAuth)",
+            "sonnet": f"Z.AI ({ZAI_SONNET_MODEL})" if SONNET_BASE_URL else "Anthropic (OAuth)",
+            "haiku": f"Z.AI ({ZAI_HAIKU_MODEL})" if HAIKU_BASE_URL else "Anthropic (OAuth)",
         },
         "circuit_breaker": circuit_breaker.status(),
         "stats": stats.summary(),
-        "fallbacks": ["web_search → Anthropic", "vision/image → Anthropic"],
+        "fallbacks": [
+            "web_search → Anthropic",
+            "web_fetch → Anthropic",
+            "vision/image → Anthropic",
+            "document/pdf → Anthropic",
+            "forced_tool_choice → Z.AI (allowed)" if ALLOW_FORCED_TOOL_CHOICE else "forced_tool_choice → Anthropic",
+        ],
+        "sanitization": [
+            "Anthropic blocks stripped from history (thinking, redacted_thinking, server_tool_use, web_search_tool_result, web_fetch_tool_result)",
+            "citations stripped from text blocks in history",
+            "cache_control passthrough to Z.AI" if ZAI_PASS_CACHE_CONTROL else "cache_control stripped everywhere",
+            "Top-level params stripped: metadata, prompt_caching, service_tier, context_management, output_config, inference_geo, container, citations, betas, effort, speed, mcp_servers",
+            "Thinking normalized: adaptive→enabled, budget_tokens/effort stripped",
+            "Server tools stripped: web_search_*, web_fetch_*, tool_search_tool_*",
+            "Tool fields stripped: defer_loading, allowed_callers, input_examples",
+        ],
     }
+
+
+# ---------------------------------------------------------------------------
+# Token stats endpoint
+# ---------------------------------------------------------------------------
+@app.get("/stats/tokens")
+async def token_stats():
+    s = stats.summary()
+    tiers = {}
+    total_cost = 0.0
+    for tier, data in s["per_tier"].items():
+        inp = data["input_tokens"]
+        out = data["output_tokens"]
+        if not inp and not out:
+            continue
+        # Calculate real cost based on actual provider pricing
+        if tier in ("sonnet", "haiku"):
+            cost = (inp * GLM5_INPUT_PRICE + out * GLM5_OUTPUT_PRICE) / 1_000_000
+        else:
+            ap = ANTHROPIC_PRICING.get(tier)
+            if ap:
+                cost = (inp * ap["input"] + out * ap["output"]) / 1_000_000
+            else:
+                cost = 0.0
+        total_cost += cost
+        tiers[tier] = {
+            "input": inp,
+            "output": out,
+            "total": data["total_tokens"],
+            "cost": f"${cost:.4f}",
+        }
+    return {
+        "total": s["total_tokens"],
+        "total_cost": f"${total_cost:.4f}",
+        "glm5_pricing": f"${GLM5_INPUT_PRICE}/MTok in, ${GLM5_OUTPUT_PRICE}/MTok out",
+        "per_tier": tiers,
+        "uptime": s["uptime"],
+    }
+
+
+# ---------------------------------------------------------------------------
+# Catch-all — forward unhandled endpoints to Anthropic
+# ---------------------------------------------------------------------------
+@app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH"])
+async def catch_all(request: Request, path: str):
+    """Forward any unhandled endpoint to Anthropic transparently."""
+    rid = short_id()
+    method = request.method
+    target_url = f"{ANTHROPIC_BASE_URL}/{path}"
+    original_headers = dict(request.headers)
+    target_headers = _build_anthropic_headers(original_headers)
+    wants_stream = original_headers.get("accept", "") == "text/event-stream"
+
+    log_route(rid, f"catch-all {method} /{path} → Anthropic{' (stream)' if wants_stream else ''}")
+
+    client = request.app.state.http_client
+    catch_start = time.time()
+    try:
+        body = await request.body()
+        if wants_stream:
+            req = client.build_request(method, target_url, content=body, headers=target_headers)
+            response = await client.send(req, stream=True)
+            if response.status_code >= 400:
+                error_body = await response.aread()
+                await response.aclose()
+                return Response(content=error_body, status_code=response.status_code, headers=strip_encoding_headers(response.headers))
+            return StreamingResponse(
+                safe_stream_wrapper(response.aiter_bytes(), rid, path, stats_tier="anthropic", start_time=catch_start),
+                media_type="text/event-stream",
+                background=BackgroundTask(response.aclose),
+            )
+        else:
+            response = await client.request(method, target_url, content=body, headers=target_headers)
+            return Response(
+                content=response.content,
+                status_code=response.status_code,
+                headers=strip_encoding_headers(response.headers),
+            )
+    except Exception as e:
+        log_err(rid, f"catch-all error: {type(e).__name__}: {e}")
+        return JSONResponse(status_code=502, content={"error": f"Proxy error: {e}"})
 
 
 # ---------------------------------------------------------------------------
@@ -768,21 +1209,28 @@ if __name__ == "__main__":
     import uvicorn
 
     validate_config()
+    host = os.getenv("HOST", "127.0.0.1")
 
     print("=" * 60)
-    print("  Claude Code Proxy — GLM-5 Router v3")
+    print("  Claude Code Proxy — GLM Router v4")
     print("=" * 60)
     print()
     print("Routing (by model name substring):")
-    print(f"  *opus*   → {'Z.AI (' + ZAI_TARGET_MODEL + ')' if OPUS_BASE_URL else 'Anthropic (OAuth)'}")
-    print(f"  *sonnet* → {'Z.AI (' + ZAI_TARGET_MODEL + ')' if SONNET_BASE_URL else 'Anthropic (OAuth)'}")
-    print(f"  *haiku*  → {'Z.AI (' + ZAI_TARGET_MODEL + ')' if HAIKU_BASE_URL else 'Anthropic (OAuth)'}")
+    print(f"  *opus*   → {'Z.AI (' + ZAI_OPUS_MODEL + ')' if OPUS_BASE_URL else 'Anthropic (OAuth)'}")
+    print(f"  *sonnet* → {'Z.AI (' + ZAI_SONNET_MODEL + ')' if SONNET_BASE_URL else 'Anthropic (OAuth)'}")
+    print(f"  *haiku*  → {'Z.AI (' + ZAI_HAIKU_MODEL + ')' if HAIKU_BASE_URL else 'Anthropic (OAuth)'}")
     print()
     print("Anthropic fallbacks:")
-    print("  web_search  → Anthropic (native model name)")
-    print("  vision      → Anthropic (native model name)")
+    print("  web_search       → Anthropic")
+    print("  web_fetch        → Anthropic")
+    print("  vision/image     → Anthropic")
+    print("  document/pdf     → Anthropic")
+    tc_status = "Z.AI (allowed)" if ALLOW_FORCED_TOOL_CHOICE else "Anthropic"
+    print(f"  tool_choice≠auto → {tc_status}")
+    cc_status = "Z.AI (passthrough)" if ZAI_PASS_CACHE_CONTROL else "stripped"
+    print(f"  cache_control    → {cc_status}")
     print()
-    print(f"Port: {PORT} | Log: {LOG_LEVEL}")
+    print(f"Listen: {host}:{PORT} | Log: {LOG_LEVEL}")
     print("=" * 60)
 
-    uvicorn.run(app, host="0.0.0.0", port=PORT, log_level="info")
+    uvicorn.run(app, host=host, port=PORT, log_level="info")
