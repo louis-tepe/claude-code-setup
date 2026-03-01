@@ -8,6 +8,7 @@
     "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"
   },
   "permissions": {
+    "defaultMode": "bypassPermissions",
     "deny": [
       "Read(**/.env*)",
       "Read(**/secrets/**)",
@@ -15,19 +16,39 @@
       "Read(~/.ssh/**)",
       "Bash(rm -rf /*)",
       "Bash(curl * | *)",
-      "Bash(wget * | *)"
+      "Bash(wget * | *)",
+      "Bash(curl * -o *)",
+      "Bash(wget * -O *)"
     ],
     "allow": [
-      "Bash(git status)",
-      "Bash(git diff *)",
-      "Bash(git log *)",
-      "Bash(npm run *)",
-      "Bash(npm test *)",
-      "Bash(pnpm *)",
-      "Bash(bun *)"
+      "WebSearch",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "WebFetch(domain:www-cdn.anthropic.com)",
+
+      "Bash(git:*)",
+      "Bash(gh:*)",
+      "Bash(node:*)",
+      "Bash(npm:*)",
+      "Bash(npx:*)",
+      "Bash(pnpm:*)",
+      "Bash(bun:*)",
+      "Bash(brew:*)",
+
+      "Bash(ls:*)",
+      "Bash(find:*)",
+      "Bash(grep:*)",
+      "Bash(cat:*)",
+      "Bash(wc:*)",
+      "Bash(test:*)",
+      "Bash(chmod:*)",
+      "Bash(xargs:*)",
+      "Bash(lsof:*)",
+      "Bash(curl:*)",
+      "Bash(python3:*)",
+      "Bash(pip3:*)"
     ],
     "ask": [
-      "Bash(git push *)",
       "Bash(npm publish *)"
     ]
   },
@@ -56,6 +77,6 @@
     "hookify@claude-plugins-official": true,
     "frontend-design@claude-plugins-official": true
   },
-  "effortLevel": "medium",
+  "effortLevel": "high",
   "skipDangerousModePermissionPrompt": true
 }
