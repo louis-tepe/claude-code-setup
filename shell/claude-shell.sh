@@ -1,11 +1,11 @@
-# ==== CLAUDE CODE PROXY - GLM-5 ROUTING ====
+# ==== CLAUDE CODE PROXY - GLM-5.1 ROUTING ====
 # Source this file in your .zshrc or .bashrc:
 #   source ~/claude-code-proxy/claude-shell.sh
 # Or the install script adds it automatically.
 
 GLM_ROUTING_FILE="$HOME/.claude/glm-routing"
-GLM_PROXY_PY="$HOME/Documents/Code/Project/claude-code-setup/proxy/proxy.py"
-GLM_PROXY_VENV="$HOME/Documents/Code/Project/claude-code-setup/proxy/venv/bin/python"
+GLM_PROXY_PY="$HOME/Documents/Code/OTHERS/claude-code-setup/proxy/proxy.py"
+GLM_PROXY_VENV="$HOME/Documents/Code/OTHERS/claude-code-setup/proxy/venv/bin/python"
 GLM_PROXY_LOG="/tmp/claude-proxy.log"
 
 # Read current routing state (default: on)
@@ -20,7 +20,7 @@ _glm_state() {
 # Start the proxy if not running
 _glm_proxy_start() {
   if ! lsof -i:8082 -sTCP:LISTEN &>/dev/null; then
-    echo "Starting GLM-5 proxy..."
+    echo "Starting GLM-5.1 proxy..."
     PYTHONUNBUFFERED=1 nohup "$GLM_PROXY_VENV" -u "$GLM_PROXY_PY" >"$GLM_PROXY_LOG" 2>&1 &
     sleep 2
     if lsof -i:8082 -sTCP:LISTEN &>/dev/null; then
@@ -65,7 +65,7 @@ claude() {
 glm-on() {
   echo "on" > "$GLM_ROUTING_FILE"
   _glm_proxy_start
-  echo "GLM-5 routing ENABLED. Relance claude pour appliquer."
+  echo "GLM-5.1 routing ENABLED. Relance claude pour appliquer."
 }
 
 glm-off() {
@@ -83,7 +83,7 @@ glm-status() {
   fi
 
   if [ "$state" = "on" ]; then
-    echo "Routing:  GLM-5 (Sonnet/Haiku → Z.AI, Opus → Anthropic)"
+    echo "Routing:  GLM-5.1 (Sonnet/Haiku → Z.AI, Opus → Anthropic)"
   else
     echo "Routing:  DIRECT (tout → Anthropic)"
   fi

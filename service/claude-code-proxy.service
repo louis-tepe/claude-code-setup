@@ -1,5 +1,5 @@
 [Unit]
-Description=Claude Code GLM-5 Proxy
+Description=Claude Code GLM-5.1 Proxy
 After=network.target
 
 [Service]

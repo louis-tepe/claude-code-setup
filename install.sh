@@ -2,10 +2,10 @@
 set -e
 
 # ==============================================================================
-# Claude Code Setup — GLM-5 Proxy + Configuration
+# Claude Code Setup — GLM-5.1 Proxy + Configuration
 # ==============================================================================
 # This script installs:
-#   1. GLM-5 proxy (routes Haiku/Sonnet → Z.AI GLM-5, Opus → Anthropic)
+#   1. GLM-5.1 proxy (routes Haiku/Sonnet → Z.AI GLM-5.1, Opus → Anthropic)
 #   2. Claude Code global config (settings, agents, statusline, plugins)
 #   3. Shell integration (auto-start proxy, aliases)
 #
@@ -72,13 +72,13 @@ play_notification() {
 
 echo ""
 echo -e "${BOLD}========================================${RESET}"
-echo -e "${BOLD}  Claude Code + GLM-5 Proxy Installer${RESET}"
+echo -e "${BOLD}  Claude Code + GLM-5.1 Proxy Installer${RESET}"
 echo -e "${BOLD}========================================${RESET}"
 echo ""
 echo "Platform: $PLATFORM"
 echo ""
 echo "This will install:"
-echo "  - GLM-5 proxy (Haiku/Sonnet → Z.AI, Opus → Anthropic)"
+echo "  - GLM-5.1 proxy (Haiku/Sonnet → Z.AI, Opus → Anthropic)"
 echo "  - Claude Code config (agents, plugins, statusline)"
 echo "  - Shell integration (auto-start proxy)"
 echo ""
@@ -163,7 +163,7 @@ echo ""
 # ------------------------------------------------------------------------------
 # Install Proxy
 # ------------------------------------------------------------------------------
-info "Installing GLM-5 proxy..."
+info "Installing GLM-5.1 proxy..."
 
 if [ -d "$PROXY_DIR" ]; then
     warn "Proxy directory already exists at $PROXY_DIR"
@@ -196,7 +196,7 @@ if [ ! -d "$PROXY_DIR" ]; then
             ok "Using Z.AI API key from environment"
         else
             echo ""
-            info "A Z.AI API key is required for GLM-5 routing."
+            info "A Z.AI API key is required for GLM-5.1 routing."
             echo "  Get one at: https://z.ai/subscribe"
             echo ""
             read -p "  Enter your Z.AI API key: " ZAI_KEY
@@ -290,7 +290,7 @@ else
     touch "$SHELL_CONFIG"
 fi
 
-MARKER_START="# ==== CLAUDE CODE PROXY - GLM-5 ROUTING ===="
+MARKER_START="# ==== CLAUDE CODE PROXY - GLM-5.1 ROUTING ===="
 MARKER_END="# ==== END CLAUDE CODE PROXY ===="
 
 if grep -q "$MARKER_START" "$SHELL_CONFIG" 2>/dev/null; then
@@ -424,7 +424,7 @@ elif 'error' in d:
 else:
     print('unknown')
 " 2>/dev/null | grep -q "ok"; then
-        ok "Z.AI GLM-5 connection working!"
+        ok "Z.AI GLM-5.1 connection working!"
     else
         warn "Z.AI connection test failed. Check your API key in ~/claude-code-proxy/.env"
         echo "  You can test manually: curl http://localhost:8082/health"

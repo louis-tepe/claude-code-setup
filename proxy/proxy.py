@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-Claude Code Proxy — GLM-5 Router (v3)
+Claude Code Proxy — GLM-5.1 Router (v3)
 
 Routes Claude Code requests by model tier:
 - Opus → Anthropic (OAuth passthrough)
-- Sonnet/Haiku → Z.AI GLM-5 (via Anthropic-compatible endpoint)
+- Sonnet/Haiku → Z.AI GLM-5.1 (via Anthropic-compatible endpoint)
 
 Key design: Claude Code keeps native model names (claude-sonnet-4-6, etc.)
-for correct capability detection. The proxy rewrites to glm-5 only when
+for correct capability detection. The proxy rewrites to glm-5.1 only when
 forwarding to Z.AI. For Anthropic fallbacks (web_search, vision), no
 rewrite is needed — the model name is already valid.
 
@@ -98,7 +98,7 @@ async def lifespan(app: FastAPI):
     await app.state.http_client.aclose()
 
 
-app = FastAPI(title="Claude Code Proxy — GLM-5 Router", lifespan=lifespan)
+app = FastAPI(title="Claude Code Proxy — GLM-5.1 Router", lifespan=lifespan)
 
 
 # ---------------------------------------------------------------------------
@@ -129,7 +129,7 @@ ANTHROPIC_BASE_URL = "https://api.anthropic.com"
 PORT = int(os.getenv("PORT", "8082"))
 
 # The model names to send to Z.AI per tier (replaces Claude model names)
-ZAI_TARGET_MODEL = os.getenv("ZAI_TARGET_MODEL", "glm-5")  # default fallback
+ZAI_TARGET_MODEL = os.getenv("ZAI_TARGET_MODEL", "glm-5.1")  # default fallback
 ZAI_SONNET_MODEL = os.getenv("ZAI_SONNET_MODEL", ZAI_TARGET_MODEL)
 ZAI_HAIKU_MODEL = os.getenv("ZAI_HAIKU_MODEL", ZAI_TARGET_MODEL)
 ZAI_OPUS_MODEL = os.getenv("ZAI_OPUS_MODEL", ZAI_TARGET_MODEL)
@@ -148,20 +148,21 @@ BASE_RETRY_DELAY = float(os.getenv("BASE_RETRY_DELAY", "1.0"))
 MAX_RETRY_DELAY = float(os.getenv("MAX_RETRY_DELAY", "60.0"))
 
 # ---------------------------------------------------------------------------
-# Pricing — used to scale tokens so Claude Code displays correct GLM-5 cost
+# Pricing — used to scale tokens so Claude Code displays correct GLM-5.1 cost
 # ---------------------------------------------------------------------------
 # Anthropic pricing (USD per million tokens) — what Claude Code uses internally
 ANTHROPIC_PRICING = {
     "sonnet": {"input": 3.00, "output": 15.00},
     "haiku":  {"input": 1.00, "output": 5.00},
 }
-# GLM-5 pricing (USD per million tokens)
+# GLM-5.1 pricing (USD per million tokens)
 GLM5_INPUT_PRICE = float(os.getenv("GLM5_INPUT_PRICE", "1.00"))
 GLM5_OUTPUT_PRICE = float(os.getenv("GLM5_OUTPUT_PRICE", "3.20"))
+# NOTE: Update these defaults if GLM-5.1 pricing differs from GLM-5
 
 
 def _scale_tokens(real_tokens: int, tier: str, direction: str) -> int:
-    """Scale token count so Anthropic pricing × scaled = GLM-5 pricing × real."""
+    """Scale token count so Anthropic pricing × scaled = GLM-5.1 pricing × real."""
     if tier not in ANTHROPIC_PRICING or real_tokens == 0:
         return real_tokens
     anthropic_price = ANTHROPIC_PRICING[tier][direction]
@@ -425,7 +426,7 @@ def _detect_tier(model_name: str) -> str | None:
         return "sonnet"
     elif "haiku" in m:
         return "haiku"
-    # Also catch direct glm-5 requests (legacy config)
+    # Also catch direct glm-5/glm-5.1 requests (legacy config)
     elif m.startswith("glm"):
         return "sonnet"  # treat GLM models as sonnet tier
     return None
@@ -695,6 +696,19 @@ def _strip_cache_control(data: dict) -> int:
 # ---------------------------------------------------------------------------
 # Streaming wrapper
 # ---------------------------------------------------------------------------
+def _estimate_input_tokens(data: dict) -> int:
+    """Estimate input tokens from request body when provider doesn't return them.
+
+    Uses ~4 characters per token as a rough approximation (standard for English).
+    Returns 0 if estimation fails.
+    """
+    try:
+        body_str = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
+        return max(1, len(body_str) // 4)
+    except (TypeError, ValueError):
+        return 0
+
+
 def _extract_tokens_from_response(content: bytes) -> tuple[int, int]:
     """Extract input/output tokens from a non-streaming Anthropic API response."""
     try:
@@ -729,6 +743,7 @@ async def safe_stream_wrapper(
     stats_tier: str | None = None,
     price_tier: str | None = None,
     start_time: float | None = None,
+    fallback_input_tokens: int = 0,
 ):
     """Yield SSE events, extracting token stats and optionally scaling usage for pricing.
 
@@ -736,6 +751,8 @@ async def safe_stream_wrapper(
         stats_tier: tier name for token accounting (real tokens)
         price_tier: tier name for price scaling (rewrites usage in events)
         start_time: request start timestamp for duration logging
+        fallback_input_tokens: estimated input tokens from request body,
+            used when the provider doesn't return input_tokens (e.g. Z.AI)
     """
     buffer = b""
     input_tokens = 0
@@ -806,12 +823,18 @@ async def safe_stream_wrapper(
     except Exception as e:
         log_err(rid, f"Mid-stream error: {label} - {type(e).__name__}: {e}")
     finally:
+        # Use fallback estimate when provider didn't return input_tokens
+        estimated = False
+        if input_tokens == 0 and fallback_input_tokens > 0 and output_tokens > 0:
+            input_tokens = fallback_input_tokens
+            estimated = True
         if stats_tier and (input_tokens or output_tokens):
             await stats.record_tokens(stats_tier, input_tokens, output_tokens)
         elapsed = f" ({time.time() - start_time:.1f}s)" if start_time else ""
         fmt = stats._fmt_tokens  # reuse compact formatter
         if input_tokens or output_tokens:
-            log_ok(rid, f"Done {fmt(input_tokens)} in / {fmt(output_tokens)} out{elapsed}")
+            in_prefix = "~" if estimated else ""
+            log_ok(rid, f"Done {in_prefix}{fmt(input_tokens)} in / {fmt(output_tokens)} out{elapsed}")
         elif start_time:
             log_ok(rid, f"Done{elapsed}")
 
@@ -975,8 +998,10 @@ async def proxy_messages(request: Request):
                     await stats.record(stats_tier, time.time() - request_start)
                     retry_info = f" retry {attempt+1}/{max_attempts}" if attempt > 0 else ""
                     log_ok(rid, f"Stream started ({response.status_code}){retry_info}")
+                    # Estimate input tokens for providers that don't return them (Z.AI)
+                    est_input = _estimate_input_tokens(data) if is_zai_route else 0
                     return StreamingResponse(
-                        safe_stream_wrapper(response.aiter_bytes(), rid, original_model, stats_tier=stats_tier, price_tier=price_tier, start_time=request_start),
+                        safe_stream_wrapper(response.aiter_bytes(), rid, original_model, stats_tier=stats_tier, price_tier=price_tier, start_time=request_start, fallback_input_tokens=est_input),
                         media_type="text/event-stream",
                         background=BackgroundTask(response.aclose),
                     )
@@ -1020,11 +1045,16 @@ async def proxy_messages(request: Request):
                         elapsed = time.time() - request_start
                         await stats.record(stats_tier, elapsed)
                         inp, out = _extract_tokens_from_response(response.content)
+                        # Fallback: estimate input tokens when provider doesn't return them
+                        in_prefix = ""
+                        if inp == 0 and out > 0 and is_zai_route:
+                            inp = _estimate_input_tokens(data)
+                            in_prefix = "~"
                         retry_info = f" retry {attempt+1}/{max_attempts}" if attempt > 0 else ""
                         if inp or out:
                             await stats.record_tokens(stats_tier, inp, out)
                             fmt = stats._fmt_tokens
-                            log_ok(rid, f"OK {fmt(inp)} in / {fmt(out)} out ({elapsed:.1f}s){retry_info}")
+                            log_ok(rid, f"OK {in_prefix}{fmt(inp)} in / {fmt(out)} out ({elapsed:.1f}s){retry_info}")
                         else:
                             log_ok(rid, f"OK ({elapsed:.1f}s){retry_info}")
                     else:
@@ -1262,7 +1292,7 @@ if __name__ == "__main__":
     host = os.getenv("HOST", "127.0.0.1")
 
     print("=" * 60)
-    print("  Claude Code Proxy — GLM Router v4")
+    print("  Claude Code Proxy — GLM-5.1 Router v4")
     print("=" * 60)
     print()
     print("Routing (by model name substring):")

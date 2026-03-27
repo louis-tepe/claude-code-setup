@@ -1,6 +1,6 @@
-# Claude Code Setup — GLM-5 Proxy
+# Claude Code Setup — GLM-5.1 Proxy
 
-> Utilise Claude Code comme un pro : **Opus 4.6** comme cerveau principal + **GLM-5** comme workers pour les sous-tâches. Résultat : un agent IA puissant sans exploser les limites hebdomadaires de ton abonnement Claude.
+> Utilise Claude Code comme un pro : **Opus 4.6** comme cerveau principal + **GLM-5.1** comme workers pour les sous-tâches. Résultat : un agent IA puissant sans exploser les limites hebdomadaires de ton abonnement Claude.
 
 ## Comment ça marche ?
 
@@ -11,7 +11,7 @@ Claude Code utilise 3 niveaux de modèles :
 
 Le problème : tout passe par Anthropic, et tu peux vite atteindre les limites hebdomadaires.
 
-**La solution** : un proxy local qui redirige Sonnet et Haiku vers GLM-5 (modèle chinois de Zhipu AI, gratuit via Z.AI), tout en gardant Opus sur ton abonnement Claude Max.
+**La solution** : un proxy local qui redirige Sonnet et Haiku vers GLM-5.1 (modèle chinois de Zhipu AI, gratuit via Z.AI), tout en gardant Opus sur ton abonnement Claude Max.
 
 ```
 Claude Code
@@ -21,11 +21,11 @@ localhost:8082
 [Proxy local]
     |
     |--- Opus ---------> Anthropic (ton abonnement Max)
-    |--- Sonnet -------> Z.AI GLM-5 (gratuit)
-    |--- Haiku --------> Z.AI GLM-5 (gratuit)
+    |--- Sonnet -------> Z.AI GLM-5.1 (gratuit)
+    |--- Haiku --------> Z.AI GLM-5.1 (gratuit)
 ```
 
-Les features incompatibles avec GLM-5 (recherche web, vision, etc.) sont automatiquement renvoyées vers Anthropic.
+Les features incompatibles avec GLM-5.1 (recherche web, vision, etc.) sont automatiquement renvoyées vers Anthropic.
 
 ---
 
@@ -117,7 +117,7 @@ Tu devrais voir :
 ```json
 {
   "status": "healthy",
-  "target_model": "glm-5",
+  "target_model": "glm-5.1",
   "routing": {
     "opus": "Anthropic (OAuth)",
     "sonnet": "Z.AI",
@@ -206,7 +206,7 @@ echo $ANTHROPIC_BASE_URL
 claude login
 ```
 
-### Erreurs GLM-5
+### Erreurs GLM-5.1
 
 Le proxy inclut un **circuit breaker** : apres 5 echecs Z.AI consecutifs, il bascule automatiquement sur Anthropic pendant 2 minutes, puis re-teste. Visible dans `/health`.
 
@@ -238,6 +238,6 @@ Le script supprime proprement : proxy, agents, integration shell, service auto-s
 
 ## Crédits
 
-- Proxy basé sur [jodavan/claude-code-proxy](https://github.com/jodavan/claude-code-proxy), adapté pour le routage GLM-5
-- Modèle GLM-5 par [Zhipu AI](https://z.ai)
+- Proxy basé sur [jodavan/claude-code-proxy](https://github.com/jodavan/claude-code-proxy), adapté pour le routage GLM-5.1
+- Modèle GLM-5.1 par [Zhipu AI](https://z.ai)
 - [Claude Code](https://docs.anthropic.com/en/docs/claude-code) par Anthropic

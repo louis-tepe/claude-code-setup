@@ -1,6 +1,6 @@
 Yo ! Je t'envoie ma config Claude Code optimisee.
 
-Le principe : un proxy local qui fait tourner Opus 4.6 (le plus intelligent) comme cerveau principal via ton abo Claude Max, et redirige les sous-taches vers GLM-5 (modele chinois gratuit). Resultat : tu utilises quasiment pas ton quota hebdomadaire Claude.
+Le principe : un proxy local qui fait tourner Opus 4.6 (le plus intelligent) comme cerveau principal via ton abo Claude Max, et redirige les sous-taches vers GLM-5.1 (modele chinois gratuit). Resultat : tu utilises quasiment pas ton quota hebdomadaire Claude.
 
 Pour installer (5 min) :
 

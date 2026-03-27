@@ -35,7 +35,7 @@ echo -e "${BOLD}  Claude Code Setup — Uninstaller${RESET}"
 echo -e "${BOLD}========================================${RESET}"
 echo ""
 echo -e "${YELLOW}This will remove:${RESET}"
-echo "  - GLM-5 proxy ($PROXY_DIR)"
+echo "  - GLM-5.1 proxy ($PROXY_DIR)"
 echo "  - Claude Code custom agents (~/.claude/agents/)"
 echo "  - Shell integration from ~/.zshrc or ~/.bashrc"
 echo "  - Auto-start service (if installed)"
@@ -96,7 +96,7 @@ fi
 # ------------------------------------------------------------------------------
 # Remove shell integration
 # ------------------------------------------------------------------------------
-MARKER_START="# ==== CLAUDE CODE PROXY - GLM-5 ROUTING ===="
+MARKER_START="# ==== CLAUDE CODE PROXY - GLM-5.1 ROUTING ===="
 MARKER_END="# ==== END CLAUDE CODE PROXY ===="
 
 for RC_FILE in "$HOME/.zshrc" "$HOME/.bashrc" "$HOME/.bash_profile"; do

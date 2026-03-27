@@ -5,7 +5,8 @@
     "MCP_TIMEOUT": "30",
     "MCP_TOOL_TIMEOUT": "60",
     "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": "85",
-    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+    "CLAUDE_CODE_SUBAGENT_MODEL": "claude-sonnet-4-6"
   },
   "permissions": {
     "defaultMode": "bypassPermissions",

@@ -47,10 +47,10 @@ if [ -f "$routing_file" ]; then
     if [ "$routing_state" = "off" ]; then
         routing_label="DIRECT"
     else
-        routing_label="GLM-5"
+        routing_label="GLM-5.1"
     fi
 else
-    routing_label="GLM-5"
+    routing_label="GLM-5.1"
 fi
 
 # Build output
