@@ -1,20 +1,22 @@
 #!/usr/bin/env python3
 """
-Claude Code Proxy — GLM-5.1 Router (v3)
+Claude Code Proxy — Multi-Provider Router (v5)
 
-Routes Claude Code requests by model tier:
+Routes Claude Code requests by model tier to configurable providers:
 - Opus → Anthropic (OAuth passthrough)
-- Sonnet/Haiku → Z.AI GLM-5.1 (via Anthropic-compatible endpoint)
+- Sonnet → Provider (GLM-5.1, MiniMax-M2.7, etc.)
+- Haiku → Provider (GLM-4.7, MiniMax-M2.7, etc.)
 
 Key design: Claude Code keeps native model names (claude-sonnet-4-6, etc.)
-for correct capability detection. The proxy rewrites to glm-5.1 only when
-forwarding to Z.AI. For Anthropic fallbacks (web_search, vision), no
+for correct capability detection. The proxy rewrites to the provider model
+only when forwarding. For Anthropic fallbacks (web_search, vision), no
 rewrite is needed — the model name is already valid.
 
 Features:
-- Circuit breaker: auto-bypass Z.AI after repeated failures
-- Startup validation: checks API keys and provider URLs
-- Automatic fallback for unsupported features (web_search, vision, forced_tool_choice)
+- Multi-provider: Z.AI GLM, MiniMax M2.7, or any Anthropic-compatible API
+- Model-based pricing: automatic cost display from MODEL_PRICING table
+- Circuit breaker: auto-bypass provider after repeated failures
+- Automatic fallback for unsupported features (web_search, vision, documents)
 """
 
 from fastapi import FastAPI, Request, Response
@@ -98,7 +100,7 @@ async def lifespan(app: FastAPI):
     await app.state.http_client.aclose()
 
 
-app = FastAPI(title="Claude Code Proxy — GLM-5.1 Router", lifespan=lifespan)
+app = FastAPI(title="Claude Code Proxy — Multi-Provider Router", lifespan=lifespan)
 
 
 # ---------------------------------------------------------------------------
@@ -129,55 +131,74 @@ ANTHROPIC_BASE_URL = "https://api.anthropic.com"
 PORT = int(os.getenv("PORT", "8082"))
 
 # The model names to send to Z.AI per tier (replaces Claude model names)
-ZAI_TARGET_MODEL = os.getenv("ZAI_TARGET_MODEL", "glm-5.1")  # default fallback
-ZAI_SONNET_MODEL = os.getenv("ZAI_SONNET_MODEL", ZAI_TARGET_MODEL)
-ZAI_HAIKU_MODEL = os.getenv("ZAI_HAIKU_MODEL", ZAI_TARGET_MODEL)
-ZAI_OPUS_MODEL = os.getenv("ZAI_OPUS_MODEL", ZAI_TARGET_MODEL)
+PROVIDER_TARGET_MODEL = os.getenv("PROVIDER_TARGET_MODEL", "glm-5.1")  # default fallback
+PROVIDER_SONNET_MODEL = os.getenv("PROVIDER_SONNET_MODEL", PROVIDER_TARGET_MODEL)
+PROVIDER_HAIKU_MODEL = os.getenv("PROVIDER_HAIKU_MODEL", PROVIDER_TARGET_MODEL)
+PROVIDER_OPUS_MODEL = os.getenv("PROVIDER_OPUS_MODEL", PROVIDER_TARGET_MODEL)
 
 
 def _zai_model_for_tier(tier: str) -> str:
     """Return the Z.AI model name for a given tier."""
-    return {"opus": ZAI_OPUS_MODEL, "sonnet": ZAI_SONNET_MODEL, "haiku": ZAI_HAIKU_MODEL}.get(tier, ZAI_TARGET_MODEL)
+    return {"opus": PROVIDER_OPUS_MODEL, "sonnet": PROVIDER_SONNET_MODEL, "haiku": PROVIDER_HAIKU_MODEL}.get(tier, PROVIDER_TARGET_MODEL)
 
 # Compatibility toggles — allow testing Z.AI support for these features
 ALLOW_FORCED_TOOL_CHOICE = os.getenv("ALLOW_FORCED_TOOL_CHOICE", "").lower() in ("1", "true", "yes")
-ZAI_PASS_CACHE_CONTROL = os.getenv("ZAI_PASS_CACHE_CONTROL", "").lower() in ("1", "true", "yes")
+PROVIDER_PASS_CACHE_CONTROL = os.getenv("PROVIDER_PASS_CACHE_CONTROL", "").lower() in ("1", "true", "yes")
 
 MAX_RETRIES = int(os.getenv("MAX_RETRIES", "3"))
 BASE_RETRY_DELAY = float(os.getenv("BASE_RETRY_DELAY", "1.0"))
 MAX_RETRY_DELAY = float(os.getenv("MAX_RETRY_DELAY", "60.0"))
 
 # ---------------------------------------------------------------------------
-# Pricing — used to scale tokens so Claude Code displays correct GLM cost
+# Pricing — model-based pricing table (USD per million tokens)
 # ---------------------------------------------------------------------------
-# Anthropic pricing (USD per million tokens) — what Claude Code uses internally
+# Anthropic pricing — what Claude Code uses internally for cost display
 ANTHROPIC_PRICING = {
     "sonnet": {"input": 3.00, "output": 15.00},
     "haiku":  {"input": 1.00, "output": 5.00},
 }
-# Per-tier GLM pricing (USD per million tokens)
-# Sonnet tier → GLM-5.1, Haiku tier → GLM-4.7 (configurable via env)
-_glm5_in = float(os.getenv("GLM5_INPUT_PRICE", "1.00"))
-_glm5_out = float(os.getenv("GLM5_OUTPUT_PRICE", "3.20"))
-GLM_PRICING = {
-    "sonnet": {
-        "input": float(os.getenv("GLM_SONNET_INPUT_PRICE", str(_glm5_in))),
-        "output": float(os.getenv("GLM_SONNET_OUTPUT_PRICE", str(_glm5_out))),
-    },
-    "haiku": {
-        "input": float(os.getenv("GLM_HAIKU_INPUT_PRICE", "0.50")),
-        "output": float(os.getenv("GLM_HAIKU_OUTPUT_PRICE", "2.00")),
-    },
+
+# Provider model pricing — keyed by model name (lowercase), resolved per tier
+# Source: https://docs.z.ai/guides/overview/pricing (Z.AI)
+# Source: https://platform.minimax.io/docs/guides/pricing-paygo (MiniMax)
+MODEL_PRICING: dict[str, dict[str, float]] = {
+    # Z.AI GLM models (official pricing from docs.z.ai)
+    "glm-5.1":        {"input": 1.40, "output": 4.40},
+    "glm-5":          {"input": 1.00, "output": 3.20},
+    "glm-5-turbo":    {"input": 1.20, "output": 4.00},
+    "glm-4.7":        {"input": 0.60, "output": 2.20},
+    "glm-4.7-flashx": {"input": 0.07, "output": 0.40},
+    "glm-4.7-flash":  {"input": 0.00, "output": 0.00},  # free tier
+    "glm-4.6":        {"input": 0.60, "output": 2.20},
+    "glm-4.5":        {"input": 0.60, "output": 2.20},
+    "glm-4.5-air":    {"input": 0.20, "output": 1.10},
+    "glm-4.5-flash":  {"input": 0.00, "output": 0.00},  # free tier
+    # MiniMax models (official pricing from platform.minimax.io)
+    "minimax-m2.7":           {"input": 0.30, "output": 1.20},
+    "minimax-m2.7-highspeed": {"input": 0.30, "output": 2.40},
+    "minimax-m2.5":           {"input": 0.15, "output": 1.20},
+    "minimax-m2.1":           {"input": 0.30, "output": 1.20},
 }
 
 
+def _model_pricing_for_tier(tier: str) -> dict[str, float] | None:
+    """Get pricing for the model assigned to a tier. Returns None for non-provider tiers."""
+    if tier not in ("sonnet", "haiku", "opus"):
+        return None
+    model = _zai_model_for_tier(tier).lower()
+    return MODEL_PRICING.get(model)
+
+
 def _scale_tokens(real_tokens: int, tier: str, direction: str) -> int:
-    """Scale token count so Anthropic pricing × scaled = GLM pricing × real."""
-    if tier not in ANTHROPIC_PRICING or tier not in GLM_PRICING or real_tokens == 0:
+    """Scale token count so Anthropic pricing × scaled = provider pricing × real."""
+    if tier not in ANTHROPIC_PRICING or real_tokens == 0:
+        return real_tokens
+    model_price = _model_pricing_for_tier(tier)
+    if not model_price:
         return real_tokens
     anthropic_price = ANTHROPIC_PRICING[tier][direction]
-    glm_price = GLM_PRICING[tier][direction]
-    return max(1, round(real_tokens * glm_price / anthropic_price))
+    provider_price = model_price[direction]
+    return max(1, round(real_tokens * provider_price / anthropic_price))
 
 
 MAX_CONCURRENT_REQUESTS = int(os.getenv("MAX_CONCURRENT_REQUESTS", "15"))
@@ -240,7 +261,7 @@ class CircuitBreaker:
             # Recovery period elapsed — close circuit (half-open → test)
             self._failures[tier] = 0
             del self._opened_at[tier]
-            logger.info(f"{GREEN}Circuit closed for {tier} — retrying Z.AI{RESET}")
+            logger.info(f"{GREEN}Circuit closed for {tier} — retrying provider{RESET}")
             return False
         return True
 
@@ -251,7 +272,7 @@ class CircuitBreaker:
             self._opened_at[tier] = time.time()
             logger.warning(
                 f"{YELLOW}Circuit OPEN for {tier} — "
-                f"bypassing Z.AI for {self.recovery_time}s after "
+                f"bypassing provider for {self.recovery_time}s after "
                 f"{self._failures[tier]} failures{RESET}"
             )
 
@@ -451,17 +472,17 @@ def get_provider_config(model_name: str):
 
     if tier == "opus":
         if OPUS_BASE_URL:
-            return (OPUS_API_KEY, OPUS_BASE_URL, "Opus→Z.AI", opus_semaphore)
+            return (OPUS_API_KEY, OPUS_BASE_URL, f"Opus→{PROVIDER_OPUS_MODEL}", opus_semaphore)
         return None  # Opus → Anthropic OAuth
 
     elif tier == "sonnet":
         if SONNET_BASE_URL:
-            return (SONNET_API_KEY, SONNET_BASE_URL, "Sonnet→Z.AI", sonnet_semaphore)
+            return (SONNET_API_KEY, SONNET_BASE_URL, f"Sonnet→{PROVIDER_SONNET_MODEL}", sonnet_semaphore)
         return None
 
     elif tier == "haiku":
         if HAIKU_BASE_URL:
-            return (HAIKU_API_KEY, HAIKU_BASE_URL, "Haiku→Z.AI", haiku_semaphore)
+            return (HAIKU_API_KEY, HAIKU_BASE_URL, f"Haiku→{PROVIDER_HAIKU_MODEL}", haiku_semaphore)
         return None
 
     # Unknown model → passthrough to Anthropic
@@ -614,7 +635,7 @@ def sanitize_for_zai(data: dict, rid: str) -> dict:
         removed.append(f"block_citations(x{citations_stripped})")
 
     # Strip cache_control unless passthrough is enabled
-    if not ZAI_PASS_CACHE_CONTROL:
+    if not PROVIDER_PASS_CACHE_CONTROL:
         cache_cleaned = _strip_cache_control(data)
         if cache_cleaned:
             removed.append(f"cache_control(x{cache_cleaned})")
@@ -983,7 +1004,7 @@ async def proxy_messages(request: Request):
                             if tier:
                                 circuit_breaker.record_failure(tier)
                             await stats.record(stats_tier, time.time() - request_start, is_error=True, is_fallback=True)
-                            log_warn(rid, "Z.AI server error, falling back to Anthropic")
+                            log_warn(rid, "Provider error, falling back to Anthropic")
                             fallback_headers = _build_anthropic_headers(original_headers)
                             fallback_headers["Accept"] = "text/event-stream"
                             fb_req = client.build_request("POST", f"{ANTHROPIC_BASE_URL}/v1/messages", json=original_data, headers=fallback_headers)
@@ -1033,7 +1054,7 @@ async def proxy_messages(request: Request):
                             if tier:
                                 circuit_breaker.record_failure(tier)
                             await stats.record(stats_tier, time.time() - request_start, is_error=True, is_fallback=True)
-                            log_warn(rid, "Z.AI server error, falling back to Anthropic")
+                            log_warn(rid, "Provider error, falling back to Anthropic")
                             fallback_headers = _build_anthropic_headers(original_headers)
                             fb_response = await client.post(f"{ANTHROPIC_BASE_URL}/v1/messages", json=original_data, headers=fallback_headers)
                             if fb_response.status_code < 400:
@@ -1089,7 +1110,7 @@ async def proxy_messages(request: Request):
                 # Timeout on Z.AI → try Anthropic
                 if is_zai_route:
                     await stats.record(stats_tier, time.time() - request_start, is_error=True, is_fallback=True)
-                    log_warn(rid, "Z.AI timeout, falling back to Anthropic")
+                    log_warn(rid, "Provider timeout, falling back to Anthropic")
                     try:
                         fallback_headers = _build_anthropic_headers(original_headers)
                         fb_response = await client.post(f"{ANTHROPIC_BASE_URL}/v1/messages", json=original_data, headers=fallback_headers)
@@ -1175,14 +1196,14 @@ async def health_check():
     return {
         "status": "healthy",
         "models": {
-            "opus": ZAI_OPUS_MODEL if OPUS_BASE_URL else None,
-            "sonnet": ZAI_SONNET_MODEL if SONNET_BASE_URL else None,
-            "haiku": ZAI_HAIKU_MODEL if HAIKU_BASE_URL else None,
+            "opus": PROVIDER_OPUS_MODEL if OPUS_BASE_URL else None,
+            "sonnet": PROVIDER_SONNET_MODEL if SONNET_BASE_URL else None,
+            "haiku": PROVIDER_HAIKU_MODEL if HAIKU_BASE_URL else None,
         },
         "routing": {
-            "opus": f"Z.AI ({ZAI_OPUS_MODEL})" if OPUS_BASE_URL else "Anthropic (OAuth)",
-            "sonnet": f"Z.AI ({ZAI_SONNET_MODEL})" if SONNET_BASE_URL else "Anthropic (OAuth)",
-            "haiku": f"Z.AI ({ZAI_HAIKU_MODEL})" if HAIKU_BASE_URL else "Anthropic (OAuth)",
+            "opus": f"Provider ({PROVIDER_OPUS_MODEL})" if OPUS_BASE_URL else "Anthropic (OAuth)",
+            "sonnet": f"Provider ({PROVIDER_SONNET_MODEL})" if SONNET_BASE_URL else "Anthropic (OAuth)",
+            "haiku": f"Provider ({PROVIDER_HAIKU_MODEL})" if HAIKU_BASE_URL else "Anthropic (OAuth)",
         },
         "circuit_breaker": circuit_breaker.status(),
         "stats": stats.summary(),
@@ -1191,12 +1212,12 @@ async def health_check():
             "web_fetch → Anthropic",
             "vision/image → Anthropic",
             "document/pdf → Anthropic",
-            "forced_tool_choice → Z.AI (allowed)" if ALLOW_FORCED_TOOL_CHOICE else "forced_tool_choice → Anthropic",
+            "forced_tool_choice → Provider (allowed)" if ALLOW_FORCED_TOOL_CHOICE else "forced_tool_choice → Anthropic",
         ],
         "sanitization": [
             "Anthropic blocks stripped from history (thinking, redacted_thinking, server_tool_use, web_search_tool_result, web_fetch_tool_result)",
             "citations stripped from text blocks in history",
-            "cache_control passthrough to Z.AI" if ZAI_PASS_CACHE_CONTROL else "cache_control stripped everywhere",
+            "cache_control passthrough to provider" if PROVIDER_PASS_CACHE_CONTROL else "cache_control stripped everywhere",
             "Top-level params stripped: metadata, prompt_caching, service_tier, context_management, output_config, inference_geo, container, citations, betas, effort, speed, mcp_servers",
             "Thinking normalized: adaptive→enabled, budget_tokens/effort stripped",
             "Server tools stripped: web_search_*, web_fetch_*, tool_search_tool_*",
@@ -1218,27 +1239,32 @@ async def token_stats():
         out = data["output_tokens"]
         if not inp and not out:
             continue
-        # Calculate real cost based on actual provider pricing
-        if tier in GLM_PRICING:
-            gp = GLM_PRICING[tier]
-            cost = (inp * gp["input"] + out * gp["output"]) / 1_000_000
+        # Calculate real cost based on model pricing
+        model_price = _model_pricing_for_tier(tier)
+        if model_price:
+            cost = (inp * model_price["input"] + out * model_price["output"]) / 1_000_000
         else:
             ap = ANTHROPIC_PRICING.get(tier)
-            if ap:
-                cost = (inp * ap["input"] + out * ap["output"]) / 1_000_000
-            else:
-                cost = 0.0
+            cost = (inp * ap["input"] + out * ap["output"]) / 1_000_000 if ap else 0.0
         total_cost += cost
         tiers[tier] = {
             "input": inp,
             "output": out,
             "total": data["total_tokens"],
             "cost": f"${cost:.4f}",
+            "model": _zai_model_for_tier(tier) if model_price else tier,
         }
+    # Show active model pricing
+    active_pricing = {}
+    for tier in ("sonnet", "haiku"):
+        model = _zai_model_for_tier(tier)
+        mp = _model_pricing_for_tier(tier)
+        if mp:
+            active_pricing[model] = f"${mp['input']}/MTok in, ${mp['output']}/MTok out"
     return {
         "total": s["total_tokens"],
         "total_cost": f"${total_cost:.4f}",
-        "pricing": {t: f"${p['input']}/MTok in, ${p['output']}/MTok out" for t, p in GLM_PRICING.items()},
+        "pricing": active_pricing,
         "per_tier": tiers,
         "uptime": s["uptime"],
     }
@@ -1303,22 +1329,22 @@ if __name__ == "__main__":
     host = os.getenv("HOST", "127.0.0.1")
 
     print("=" * 60)
-    print("  Claude Code Proxy — GLM-5.1 Router v4")
+    print("  Claude Code Proxy — Multi-Provider Router v5")
     print("=" * 60)
     print()
     print("Routing (by model name substring):")
-    print(f"  *opus*   → {'Z.AI (' + ZAI_OPUS_MODEL + ')' if OPUS_BASE_URL else 'Anthropic (OAuth)'}")
-    print(f"  *sonnet* → {'Z.AI (' + ZAI_SONNET_MODEL + ')' if SONNET_BASE_URL else 'Anthropic (OAuth)'}")
-    print(f"  *haiku*  → {'Z.AI (' + ZAI_HAIKU_MODEL + ')' if HAIKU_BASE_URL else 'Anthropic (OAuth)'}")
+    print(f"  *opus*   → {'Z.AI (' + PROVIDER_OPUS_MODEL + ')' if OPUS_BASE_URL else 'Anthropic (OAuth)'}")
+    print(f"  *sonnet* → {'Z.AI (' + PROVIDER_SONNET_MODEL + ')' if SONNET_BASE_URL else 'Anthropic (OAuth)'}")
+    print(f"  *haiku*  → {'Z.AI (' + PROVIDER_HAIKU_MODEL + ')' if HAIKU_BASE_URL else 'Anthropic (OAuth)'}")
     print()
     print("Anthropic fallbacks:")
     print("  web_search       → Anthropic")
     print("  web_fetch        → Anthropic")
     print("  vision/image     → Anthropic")
     print("  document/pdf     → Anthropic")
-    tc_status = "Z.AI (allowed)" if ALLOW_FORCED_TOOL_CHOICE else "Anthropic"
+    tc_status = "Provider (allowed)" if ALLOW_FORCED_TOOL_CHOICE else "Anthropic"
     print(f"  tool_choice≠auto → {tc_status}")
-    cc_status = "Z.AI (passthrough)" if ZAI_PASS_CACHE_CONTROL else "stripped"
+    cc_status = "Provider (passthrough)" if PROVIDER_PASS_CACHE_CONTROL else "stripped"
     print(f"  cache_control    → {cc_status}")
     print()
     print(f"Listen: {host}:{PORT} | Log: {LOG_LEVEL}")
