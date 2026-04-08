@@ -650,7 +650,7 @@ def sanitize_for_zai(data: dict, rid: str) -> dict:
             removed.append(f"cache_control(x{cache_cleaned})")
 
     if removed:
-        logger.info(f"[{rid}] Sanitized: {', '.join(removed)}")
+        logger.debug(f"[{rid}] Sanitized: {', '.join(removed)}")
 
     return data
 
@@ -964,7 +964,7 @@ async def proxy_messages(request: Request):
         # Sanitize Anthropic-specific parameters
         data = sanitize_for_zai(data, rid)
 
-        log_route(rid, f"{original_model} {stream_tag} {provider_label} (model→{zai_model})")
+        log_route(rid, f"{original_model} {stream_tag} {provider_label}")
 
     # ── Route to Anthropic (OAuth passthrough) ──
     else:
@@ -1216,7 +1216,7 @@ async def proxy_count_tokens(request: Request):
     target_url = f"{ANTHROPIC_BASE_URL}/v1/messages/count_tokens"
     target_headers = _build_anthropic_headers(original_headers)
 
-    log_route(rid, f"count_tokens {original_model} → Anthropic")
+    logger.debug(f"[{rid}] count_tokens {original_model} → Anthropic")
 
     client = request.app.state.http_client
     count_start = time.time()
@@ -1226,7 +1226,7 @@ async def proxy_count_tokens(request: Request):
         if response.status_code >= 400:
             log_err(rid, f"count_tokens HTTP {response.status_code}: {response.text[:300]}")
         else:
-            log_ok(rid, f"count_tokens OK ({elapsed:.1f}s)")
+            logger.debug(f"[{rid}] count_tokens OK ({elapsed:.1f}s)")
         return Response(
             content=response.content,
             status_code=response.status_code,
@@ -1382,9 +1382,9 @@ if __name__ == "__main__":
     print("=" * 60)
     print()
     print("Routing (by model name substring):")
-    print(f"  *opus*   → {'Z.AI (' + PROVIDER_OPUS_MODEL + ')' if OPUS_BASE_URL else 'Anthropic (OAuth)'}")
-    print(f"  *sonnet* → {'Z.AI (' + PROVIDER_SONNET_MODEL + ')' if SONNET_BASE_URL else 'Anthropic (OAuth)'}")
-    print(f"  *haiku*  → {'Z.AI (' + PROVIDER_HAIKU_MODEL + ')' if HAIKU_BASE_URL else 'Anthropic (OAuth)'}")
+    print(f"  *opus*   → {PROVIDER_OPUS_MODEL if OPUS_BASE_URL else 'Anthropic (OAuth)'}")
+    print(f"  *sonnet* → {PROVIDER_SONNET_MODEL if SONNET_BASE_URL else 'Anthropic (OAuth)'}")
+    print(f"  *haiku*  → {PROVIDER_HAIKU_MODEL if HAIKU_BASE_URL else 'Anthropic (OAuth)'}")
     print()
     print("Anthropic fallbacks:")
     print("  web_search       → Anthropic")
@@ -1399,4 +1399,4 @@ if __name__ == "__main__":
     print(f"Listen: {host}:{PORT} | Log: {LOG_LEVEL}")
     print("=" * 60)
 
-    uvicorn.run(app, host=host, port=PORT, log_level="info", access_log=False)
+    uvicorn.run(app, host=host, port=PORT, log_level="warning", access_log=False)
