@@ -1009,12 +1009,17 @@ async def proxy_messages(request: Request):
                         body_str = body.decode(errors='replace')
                         log_err(rid, f"Stream error {response.status_code}: {body_str[:500]}")
 
-                        # Z.AI server error → fallback to Anthropic
+                        # Provider server error — retry on provider first, fallback last
                         if is_zai_route and _is_zai_server_error_status(response.status_code, body_str):
                             if tier:
                                 circuit_breaker.record_failure(tier)
+                            if attempt < max_attempts - 1:
+                                log_warn(rid, f"Provider error ({response.status_code}), retrying provider ({attempt+2}/{max_attempts})")
+                                await asyncio.sleep(calculate_retry_delay(attempt))
+                                continue
+                            # All retries exhausted — fallback to Anthropic
                             await stats.record(stats_tier, time.time() - request_start, is_error=True, is_fallback=True)
-                            log_warn(rid, "Provider error, falling back to Anthropic")
+                            log_warn(rid, "Provider retries exhausted, falling back to Anthropic")
                             fallback_headers = _build_anthropic_headers(original_headers)
                             fallback_headers["Accept"] = "text/event-stream"
                             fb_req = client.build_request("POST", f"{ANTHROPIC_BASE_URL}/v1/messages", json=original_data, headers=fallback_headers)
@@ -1059,12 +1064,17 @@ async def proxy_messages(request: Request):
                     if response.status_code >= 400:
                         log_err(rid, f"HTTP {response.status_code}: {response.text[:500]}")
 
-                        # Z.AI server error → fallback to Anthropic
+                        # Provider server error — retry on provider first, fallback last
                         if is_zai_route and _is_zai_server_error_status(response.status_code, response.text[:1000]):
                             if tier:
                                 circuit_breaker.record_failure(tier)
+                            if attempt < max_attempts - 1:
+                                log_warn(rid, f"Provider error ({response.status_code}), retrying provider ({attempt+2}/{max_attempts})")
+                                await asyncio.sleep(calculate_retry_delay(attempt))
+                                continue
+                            # All retries exhausted — fallback to Anthropic
                             await stats.record(stats_tier, time.time() - request_start, is_error=True, is_fallback=True)
-                            log_warn(rid, "Provider error, falling back to Anthropic")
+                            log_warn(rid, "Provider retries exhausted, falling back to Anthropic")
                             fallback_headers = _build_anthropic_headers(original_headers)
                             fb_response = await client.post(f"{ANTHROPIC_BASE_URL}/v1/messages", json=original_data, headers=fallback_headers)
                             if fb_response.status_code < 400:
@@ -1146,6 +1156,20 @@ async def proxy_messages(request: Request):
                 if attempt < MAX_RETRIES - 1:
                     await asyncio.sleep(calculate_retry_delay(attempt))
                     continue
+                # All retries exhausted — fallback to Anthropic
+                if is_zai_route and original_data:
+                    await stats.record(stats_tier, time.time() - request_start, is_error=True, is_fallback=True)
+                    log_warn(rid, "Provider unreachable, falling back to Anthropic")
+                    try:
+                        fallback_headers = _build_anthropic_headers(original_headers)
+                        fb_response = await client.post(f"{ANTHROPIC_BASE_URL}/v1/messages", json=original_data, headers=fallback_headers)
+                        if fb_response.status_code < 400:
+                            log_ok(rid, f"Anthropic fallback OK ({fb_response.status_code})")
+                        else:
+                            log_err(rid, f"Anthropic fallback also failed: {fb_response.status_code}: {fb_response.text[:500]}")
+                        return Response(content=fb_response.content, status_code=fb_response.status_code, headers=strip_encoding_headers(fb_response.headers))
+                    except Exception as fb_err:
+                        log_err(rid, f"Anthropic fallback also failed: {fb_err}")
                 return JSONResponse(status_code=504, content={"error": "Gateway timeout"})
 
             except httpx.HTTPStatusError as e:
@@ -1157,6 +1181,20 @@ async def proxy_messages(request: Request):
                 if attempt < MAX_RETRIES - 1:
                     await asyncio.sleep(calculate_retry_delay(attempt))
                     continue
+                # All retries exhausted — fallback to Anthropic
+                if is_zai_route and original_data:
+                    await stats.record(stats_tier, time.time() - request_start, is_error=True, is_fallback=True)
+                    log_warn(rid, "Provider error, falling back to Anthropic")
+                    try:
+                        fallback_headers = _build_anthropic_headers(original_headers)
+                        fb_response = await client.post(f"{ANTHROPIC_BASE_URL}/v1/messages", json=original_data, headers=fallback_headers)
+                        if fb_response.status_code < 400:
+                            log_ok(rid, f"Anthropic fallback OK ({fb_response.status_code})")
+                        else:
+                            log_err(rid, f"Anthropic fallback also failed: {fb_response.status_code}: {fb_response.text[:500]}")
+                        return Response(content=fb_response.content, status_code=fb_response.status_code, headers=strip_encoding_headers(fb_response.headers))
+                    except Exception as fb_err:
+                        log_err(rid, f"Anthropic fallback also failed: {fb_err}")
                 return JSONResponse(status_code=500, content={"error": f"Proxy error: {e}"})
 
         log_err(rid, f"Max retries exhausted ({max_attempts} attempts)")
