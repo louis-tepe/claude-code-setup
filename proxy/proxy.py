@@ -201,6 +201,15 @@ def _scale_tokens(real_tokens: int, tier: str, direction: str) -> int:
     return max(1, round(real_tokens * provider_price / anthropic_price))
 
 
+def _fmt_cost(input_tokens: int, output_tokens: int, tier: str) -> str:
+    """Format per-request cost string for logging. Returns '' if no pricing."""
+    mp = _model_pricing_for_tier(tier)
+    if not mp or (input_tokens == 0 and output_tokens == 0):
+        return ""
+    cost = (input_tokens * mp["input"] + output_tokens * mp["output"]) / 1_000_000
+    return f" ${cost:.4f}" if cost >= 0.0001 else f" ${cost:.6f}"
+
+
 MAX_CONCURRENT_REQUESTS = int(os.getenv("MAX_CONCURRENT_REQUESTS", "15"))
 haiku_semaphore = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
 sonnet_semaphore = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
@@ -865,7 +874,8 @@ async def safe_stream_wrapper(
         fmt = stats._fmt_tokens  # reuse compact formatter
         if input_tokens or output_tokens:
             in_prefix = "~" if estimated else ""
-            log_ok(rid, f"Done {in_prefix}{fmt(input_tokens)} in / {fmt(output_tokens)} out{elapsed}")
+            cost_str = _fmt_cost(input_tokens, output_tokens, stats_tier) if stats_tier else ""
+            log_ok(rid, f"Done {in_prefix}{fmt(input_tokens)} in / {fmt(output_tokens)} out{elapsed}{cost_str}")
         elif start_time:
             log_ok(rid, f"Done{elapsed}")
 
@@ -1085,7 +1095,8 @@ async def proxy_messages(request: Request):
                         if inp or out:
                             await stats.record_tokens(stats_tier, inp, out)
                             fmt = stats._fmt_tokens
-                            log_ok(rid, f"OK {in_prefix}{fmt(inp)} in / {fmt(out)} out ({elapsed:.1f}s){retry_info}")
+                            cost_str = _fmt_cost(inp, out, stats_tier)
+                            log_ok(rid, f"OK {in_prefix}{fmt(inp)} in / {fmt(out)} out ({elapsed:.1f}s){cost_str}{retry_info}")
                         else:
                             log_ok(rid, f"OK ({elapsed:.1f}s){retry_info}")
                     else:
