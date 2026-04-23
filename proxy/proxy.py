@@ -145,6 +145,11 @@ def _zai_model_for_tier(tier: str) -> str:
 # Compatibility toggles — allow testing Z.AI support for these features
 ALLOW_FORCED_TOOL_CHOICE = os.getenv("ALLOW_FORCED_TOOL_CHOICE", "").lower() in ("1", "true", "yes")
 PROVIDER_PASS_CACHE_CONTROL = os.getenv("PROVIDER_PASS_CACHE_CONTROL", "").lower() in ("1", "true", "yes")
+# Strip thinking/redacted_thinking blocks from history when forwarding to provider.
+# Default: strip (safe for Z.AI GLM which doesn't accept thinking blocks).
+# Set to 0 for MiMo and MiniMax which require thinking blocks in history for best
+# multi-turn tool use performance (per their official Anthropic-compat API docs).
+PROVIDER_STRIP_THINKING = os.getenv("PROVIDER_STRIP_THINKING", "1").lower() in ("1", "true", "yes")
 
 MAX_RETRIES = int(os.getenv("MAX_RETRIES", "3"))
 BASE_RETRY_DELAY = float(os.getenv("BASE_RETRY_DELAY", "1.0"))
@@ -685,24 +690,32 @@ def sanitize_for_zai(data: dict, rid: str) -> dict:
     return data
 
 
-# Anthropic-specific content block types to strip from message history
-_ANTHROPIC_ONLY_BLOCKS = frozenset({
-    "thinking", "redacted_thinking",                  # thinking signature breaks Z.AI
+# Content blocks stripped from message history before forwarding to provider.
+# Server-side tool blocks always stripped (never meaningful outside Anthropic).
+# Thinking blocks stripped only when PROVIDER_STRIP_THINKING=1 (safe for Z.AI GLM,
+# but should be kept for MiMo/MiniMax where they improve multi-turn performance).
+_SERVER_TOOL_BLOCKS = frozenset({
     "server_tool_use",                                 # Anthropic server-side tool call
     "web_search_tool_result", "web_fetch_tool_result", # server tool results
 })
+_THINKING_BLOCKS = frozenset({"thinking", "redacted_thinking"})
 
 
 def _strip_anthropic_blocks(data: dict) -> tuple[int, int]:
     """Remove Anthropic-specific content blocks from assistant messages.
 
-    Strips: thinking/redacted_thinking (signature breaks Z.AI),
-    server_tool_use, web_search_tool_result, web_fetch_tool_result
-    (Anthropic server-side tool blocks unknown to Z.AI).
-    Also strips `citations` arrays from text blocks in history.
+    Always strips: server_tool_use, web_search_tool_result, web_fetch_tool_result
+    (never meaningful outside Anthropic). Also strips `citations` from text blocks.
+
+    Conditionally strips thinking/redacted_thinking when PROVIDER_STRIP_THINKING=1.
+    MiMo and MiniMax require these blocks for best multi-turn tool performance,
+    while Z.AI GLM rejects them (signature validation mismatch).
 
     Returns (blocks_removed, citations_removed).
     """
+    strip_types = set(_SERVER_TOOL_BLOCKS)
+    if PROVIDER_STRIP_THINKING:
+        strip_types |= _THINKING_BLOCKS
     blocks_removed = 0
     citations_removed = 0
     for msg in data.get("messages", []):
@@ -714,7 +727,7 @@ def _strip_anthropic_blocks(data: dict) -> tuple[int, int]:
         original_len = len(content)
         new_content = []
         for block in content:
-            if isinstance(block, dict) and block.get("type") in _ANTHROPIC_ONLY_BLOCKS:
+            if isinstance(block, dict) and block.get("type") in strip_types:
                 continue  # strip entire block
             # Strip citations from text blocks (Anthropic-only field)
             if isinstance(block, dict) and "citations" in block:
@@ -1416,7 +1429,8 @@ async def health_check():
             "forced_tool_choice → Provider (allowed)" if ALLOW_FORCED_TOOL_CHOICE else "forced_tool_choice → Anthropic",
         ],
         "sanitization": [
-            "Anthropic blocks stripped from history (thinking, redacted_thinking, server_tool_use, web_search_tool_result, web_fetch_tool_result)",
+            "Server tool blocks stripped from history (server_tool_use, web_search_tool_result, web_fetch_tool_result)",
+            f"thinking blocks {'stripped' if PROVIDER_STRIP_THINKING else 'preserved'} in history (PROVIDER_STRIP_THINKING={int(PROVIDER_STRIP_THINKING)})",
             "citations stripped from text blocks in history",
             "cache_control passthrough to provider" if PROVIDER_PASS_CACHE_CONTROL else "cache_control stripped everywhere",
             "Top-level params stripped: metadata, prompt_caching, service_tier, context_management, output_config, inference_geo, container, citations, betas, effort, speed, mcp_servers",

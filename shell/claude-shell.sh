@@ -141,6 +141,7 @@ _proxy_env_clean() {
   unset ANTHROPIC_BASE_URL
   unset ANTHROPIC_AUTH_TOKEN
   unset API_TIMEOUT_MS
+  unset ANTHROPIC_MODEL
   unset ANTHROPIC_DEFAULT_OPUS_MODEL
   unset ANTHROPIC_DEFAULT_SONNET_MODEL
   unset ANTHROPIC_DEFAULT_HAIKU_MODEL
@@ -256,6 +257,7 @@ claude() {
       ;;
     mimo_full)
       # Direct Xiaomi MiMo — no proxy (same model on all tiers)
+      # Per official docs: https://platform.xiaomimimo.com/docs/integration/claudecode
       local key=$(_read_key_file ".mimo-api-key")
       if [ -z "$key" ]; then
         echo "ERROR: MiMo API key not found at ~/.claude/.mimo-api-key"
@@ -264,6 +266,7 @@ claude() {
       export ANTHROPIC_BASE_URL=https://token-plan-ams.xiaomimimo.com/anthropic
       export ANTHROPIC_AUTH_TOKEN="$key"
       export API_TIMEOUT_MS=3000000
+      export ANTHROPIC_MODEL=mimo-v2.5-pro
       export ANTHROPIC_DEFAULT_OPUS_MODEL=mimo-v2.5-pro
       export ANTHROPIC_DEFAULT_SONNET_MODEL=mimo-v2.5-pro
       export ANTHROPIC_DEFAULT_HAIKU_MODEL=mimo-v2.5-pro
