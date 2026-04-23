@@ -76,14 +76,16 @@ echo ""
 echo "Platform: $PLATFORM"
 echo ""
 echo "This will install:"
-echo "  - Multi-provider proxy (GLM, MiniMax, or any Anthropic-compatible API)"
+echo "  - Multi-provider proxy (GLM, MiniMax, MiMo, or any Anthropic-compatible API)"
 echo "  - Claude Code config (agents, statusline)"
-echo "  - Shell integration with 5 routing modes:"
+echo "  - Shell integration with 7 routing modes:"
 echo "      claude-full  = Full Claude (all → Anthropic OAuth)"
 echo "      glm-on       = Hybrid GLM (Sonnet → GLM-5.1, Haiku → GLM-4.7)"
 echo "      minimax-on   = Hybrid MiniMax (Sonnet/Haiku → MiniMax M2.7)"
+echo "      mimo-on      = Hybrid MiMo (Sonnet/Haiku → MiMo-V2.5-Pro)"
 echo "      mix-on       = Split (Sonnet → GLM-5.1, Haiku → MiniMax M2.7)"
 echo "      glm-full     = Full GLM (all → Z.AI direct)"
+echo "      mimo-full    = Full MiMo (all → Xiaomi MiMo direct)"
 echo ""
 
 # ------------------------------------------------------------------------------
@@ -240,6 +242,23 @@ else
         ok "MiniMax API key saved"
     else
         warn "Skipped — MiniMax/mix modes won't work without a MiniMax key"
+    fi
+fi
+
+# MiMo key
+if [ -f "$CLAUDE_DIR/.mimo-api-key" ] && [ -s "$CLAUDE_DIR/.mimo-api-key" ]; then
+    ok "MiMo API key already configured"
+else
+    echo ""
+    echo "  Xiaomi MiMo API key (for MiMo modes). Get one at: https://mimo.mi.com/"
+    echo "  Key format: tp-xxx (Token Plan) or sk-xxx (Pay-as-you-go)"
+    read -p "  Enter your MiMo API key (or press Enter to skip): " MIMO_KEY
+    if [ -n "$MIMO_KEY" ]; then
+        echo "$MIMO_KEY" > "$CLAUDE_DIR/.mimo-api-key"
+        chmod 600 "$CLAUDE_DIR/.mimo-api-key"
+        ok "MiMo API key saved"
+    else
+        warn "Skipped — MiMo modes won't work without a MiMo key"
     fi
 fi
 
@@ -412,8 +431,10 @@ echo "  2. Choose a mode:"
 echo "     claude-full  → Full Claude (Anthropic OAuth)"
 echo "     glm-on       → Hybrid GLM (Sonnet→GLM-5.1, Haiku→GLM-4.7)"
 echo "     minimax-on   → Hybrid MiniMax (Sonnet/Haiku→MiniMax M2.7)"
+echo "     mimo-on      → Hybrid MiMo (Sonnet/Haiku→MiMo-V2.5-Pro)"
 echo "     mix-on       → Split (Sonnet→GLM-5.1, Haiku→MiniMax M2.7)"
 echo "     glm-full     → Full GLM (all→Z.AI direct)"
+echo "     mimo-full    → Full MiMo (all→Xiaomi MiMo direct)"
 echo "  3. claude"
 echo ""
 echo "Utilities: proxy-status | proxy-tokens | proxy-keys | proxy-logs"

@@ -1,16 +1,18 @@
 # Claude Code Setup — Multi-Provider Router
 
-> Use Claude Code with **multiple LLM providers** (Z.AI GLM, MiniMax, or any Anthropic-compatible API) via a local proxy. The main agent (Opus) stays on Anthropic while sub-tasks route through cheaper/faster providers.
+> Use Claude Code with **multiple LLM providers** (Z.AI GLM, MiniMax, Xiaomi MiMo, or any Anthropic-compatible API) via a local proxy. The main agent (Opus) stays on Anthropic while sub-tasks route through cheaper/faster providers.
 
-## 5 Routing Modes
+## 7 Routing Modes
 
 | Command | Mode | Description |
 |---------|------|-------------|
 | `claude-full` | **Full Claude** | All → Anthropic OAuth (native, zero overhead) |
 | `glm-on` | **Hybrid GLM** | Sonnet → GLM-5.1, Haiku → GLM-4.7, Opus → Anthropic |
 | `minimax-on` | **Hybrid MiniMax** | Sonnet/Haiku → MiniMax M2.7, Opus → Anthropic |
+| `mimo-on` | **Hybrid MiMo** | Sonnet/Haiku → MiMo-V2.5-Pro, Opus → Anthropic |
 | `mix-on` | **Split** | Sonnet → GLM-5.1, Haiku → MiniMax M2.7, Opus → Anthropic |
 | `glm-full` | **Full GLM** | All → Z.AI direct (official config, no proxy) |
+| `mimo-full` | **Full MiMo** | All → Xiaomi MiMo direct (mimo-v2.5-pro, no proxy) |
 
 ### How it works
 
@@ -26,12 +28,18 @@
   minimax-on        │  HYBRID MINIMAX                               │
                     │  Opus → Anthropic | Sonnet/Haiku → MiniMax    │
                     ├──────────────────────────────────────────────┤
+  mimo-on           │  HYBRID MIMO                                  │
+                    │  Opus → Anthropic | Sonnet/Haiku → MiMo-V2.5  │
+                    ├──────────────────────────────────────────────┤
   mix-on            │  SPLIT (best of both)                         │
                     │  Opus → Anthropic | Sonnet → GLM-5.1          │
                     │                   | Haiku  → MiniMax M2.7     │
                     ├──────────────────────────────────────────────┤
   glm-full          │  FULL GLM                                     │
                     │  All requests → Z.AI direct (no proxy)        │
+                    ├──────────────────────────────────────────────┤
+  mimo-full         │  FULL MIMO                                    │
+                    │  All requests → Xiaomi MiMo direct (no proxy) │
                     └──────────────────────────────────────────────┘
 ```
 
@@ -56,6 +64,7 @@
 | **Claude Max subscription** | [claude.ai/settings](https://claude.ai/settings) | Required for Opus via OAuth |
 | **GLM Coding Plan** (optional) | [z.ai/subscribe](https://z.ai/subscribe) | From $10/month |
 | **MiniMax API key** (optional) | [platform.minimax.io](https://platform.minimax.io) | Pay-as-you-go |
+| **Xiaomi MiMo Token Plan** (optional) | [mimo.mi.com](https://mimo.mi.com/) | Pro Monthly / Pay-as-you-go (key format: `tp-xxx` or `sk-xxx`) |
 
 ---
 
@@ -97,12 +106,15 @@ echo 'your_zai_key' > ~/.claude/.zai-api-key
 
 # MiniMax (for MiniMax/mix modes)
 echo 'your_minimax_key' > ~/.claude/.minimax-api-key
+
+# Xiaomi MiMo (for MiMo modes)
+echo 'your_mimo_key' > ~/.claude/.mimo-api-key
 ```
 
 ### Step 5 — Choose a mode and launch
 
 ```bash
-minimax-on    # or glm-on, mix-on, claude-full
+mimo-on    # or glm-on, minimax-on, mix-on, claude-full
 claude
 ```
 
@@ -115,8 +127,10 @@ claude
 |---------|-------------|
 | `glm-on` | Hybrid GLM (Sonnet → GLM-5.1, Haiku → GLM-4.7) |
 | `minimax-on` | Hybrid MiniMax (Sonnet/Haiku → MiniMax M2.7) |
+| `mimo-on` | Hybrid MiMo (Sonnet/Haiku → MiMo-V2.5-Pro) |
 | `mix-on` | Split (Sonnet → GLM-5.1, Haiku → MiniMax M2.7) |
 | `glm-full` | Full GLM (all → Z.AI direct) |
+| `mimo-full` | Full MiMo (all → Xiaomi MiMo direct) |
 | `claude-full` | Full Claude (all → Anthropic) |
 
 ### Utilities
@@ -134,13 +148,15 @@ claude
 
 ```
 ~/.claude/                          # User config (never in git)
-├── proxy-routing                   # Current mode state (on/minimax/mix/full/off)
+├── proxy-routing                   # Current mode state (on/minimax/mix/mimo/full/mimo_full/off)
 ├── proxy-modes/                    # Provider config per mode
 │   ├── on.env                      # GLM hybrid config
 │   ├── minimax.env                 # MiniMax hybrid config
+│   ├── mimo.env                    # MiMo hybrid config
 │   └── mix.env                     # Split GLM+MiniMax config
 ├── .zai-api-key                    # Z.AI API key
 ├── .minimax-api-key                # MiniMax API key
+├── .mimo-api-key                   # Xiaomi MiMo API key
 ├── claude-shell.sh                 # Shell wrapper (sourced by .zshrc)
 └── statusline-command.sh           # Status bar display
 
@@ -199,6 +215,7 @@ Pricing is resolved automatically by model name in `proxy.py`:
 | GLM-5.1 | $1.40 | $4.40 | Z.AI |
 | GLM-4.7 | $0.60 | $2.20 | Z.AI |
 | MiniMax M2.7 | $0.30 | $1.20 | MiniMax |
+| MiMo-V2.5-Pro | Token Plan | Token Plan | Xiaomi (credits-based) |
 | Claude Sonnet 4.6 | $3.00 | $15.00 | Anthropic |
 | Claude Haiku 4.5 | $1.00 | $5.00 | Anthropic |
 
@@ -230,4 +247,5 @@ claude-full                     # Bypass proxy, use Anthropic directly
 - Proxy originally based on [jodavan/claude-code-proxy](https://github.com/jodavan/claude-code-proxy)
 - GLM models by [Zhipu AI / Z.AI](https://z.ai)
 - MiniMax models by [MiniMax](https://minimax.io)
+- MiMo models by [Xiaomi](https://mimo.xiaomi.com)
 - [Claude Code](https://docs.anthropic.com/en/docs/claude-code) by Anthropic

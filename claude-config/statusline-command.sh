@@ -45,12 +45,14 @@ routing_file="$HOME/.claude/proxy-routing"
 if [ -f "$routing_file" ]; then
     routing_state=$(cat "$routing_file" 2>/dev/null | tr -d '[:space:]')
     case "$routing_state" in
-        off)     routing_label="CLAUDE" ;;
-        full)    routing_label="GLM-FULL" ;;
-        on)      routing_label="GLM" ;;
-        minimax) routing_label="MINIMAX" ;;
-        mix)     routing_label="MIX" ;;
-        *)       routing_label="$routing_state" ;;
+        off)       routing_label="CLAUDE" ;;
+        full)      routing_label="GLM-FULL" ;;
+        on)        routing_label="GLM" ;;
+        minimax)   routing_label="MINIMAX" ;;
+        mix)       routing_label="MIX" ;;
+        mimo)      routing_label="MIMO" ;;
+        mimo_full) routing_label="MIMO-FULL" ;;
+        *)         routing_label="$routing_state" ;;
     esac
 else
     routing_label="CLAUDE"

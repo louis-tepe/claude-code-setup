@@ -12,11 +12,11 @@ Claude Code est un agent IA qui aide les developpeurs a coder. Pour fonctionner,
 | Claude Sonnet 4.6 | $3.00 | $15.00 |
 | Claude Haiku 4.5 | $1.00 | $5.00 |
 
-Ce projet insere un **proxy local** entre Claude Code et les API des fournisseurs. Ce proxy redirige les requetes vers des modeles moins chers (Z.AI GLM, MiniMax), tout en gardant Opus sur Anthropic. Resultat : une reduction massive des couts sans sacrifier la qualite.
+Ce projet insere un **proxy local** entre Claude Code et les API des fournisseurs. Ce proxy redirige les requetes vers des modeles moins chers (Z.AI GLM, MiniMax, Xiaomi MiMo), tout en gardant Opus sur Anthropic. Resultat : une reduction massive des couts sans sacrifier la qualite.
 
 ### Ce que ce projet ajoute
 
-- **5 modes de routage** : differents schemas de distribution entre fournisseurs
+- **7 modes de routage** : differents schemas de distribution entre fournisseurs
 - **Un proxy local** : un serveur FastAPI qui intercepte et redirige les requetes
 - **Des commandes shell** : `minimax-on`, `glm-on`, etc. pour changer de mode
 - **De la transparence** : cout reel en temps reel, statistiques d'utilisation
@@ -96,15 +96,17 @@ Le proxy ne sait pas quel bouton tu as appuye. Il recoit juste "envoie ca a cett
 
 ---
 
-## 4. Les 5 Modes en Detail
+## 4. Les 7 Modes en Detail
 
 | Mode | Sonnet | Haiku | Opus | Caching | Quand l'utiliser |
 |---|---|---|---|---|---|
 | `claude-full` | Anthropic | Anthropic | Anthropic | oui | 100% natif, debug |
 | `glm-on` | GLM-5.1 | GLM-4.7 | Anthropic | non | Usage quotidien |
 | `minimax-on` | M2.7 | M2.7 | Anthropic | oui | Max economie |
+| `mimo-on` | MiMo-V2.5-Pro | MiMo-V2.5-Pro | Anthropic | oui | Token Plan Xiaomi (credits) |
 | `mix-on` | GLM-5.1 | M2.7 | Anthropic | partiel | Optimal (qualite + cout) |
 | `glm-full` | Z.AI direct | Z.AI direct | Z.AI direct | non | Z.AI only, pas d'Anthropic |
+| `mimo-full` | MiMo direct | MiMo direct | MiMo direct | oui | Token Plan Xiaomi sur tous tiers |
 
 ### Comparaison des couts (pour 100k tokens in + 50k out)
 
@@ -113,6 +115,7 @@ Le proxy ne sait pas quel bouton tu as appuye. Il recoit juste "envoie ca a cett
 | `claude-full` | $1.05 | $3.50 | $4.55 | — |
 | `glm-on` | $0.36 | $1.70 | $2.06 | -55% |
 | `minimax-on` | $0.09 | $0.60 | $0.69 | -85% |
+| `mimo-on` | $0.25 | $1.25 | $1.50 | -67% (PAYG, sinon forfait) |
 | `mix-on` | $0.36 | $0.90 | $1.26 | -72% |
 
 ---

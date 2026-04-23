@@ -162,6 +162,7 @@ ANTHROPIC_PRICING = {
 # Provider model pricing — keyed by model name (lowercase), resolved per tier
 # Source: https://docs.z.ai/guides/overview/pricing (Z.AI)
 # Source: https://platform.minimax.io/docs/guides/pricing-paygo (MiniMax)
+# Source: https://openrouter.ai/xiaomi/mimo-v2.5-pro (Xiaomi MiMo)
 MODEL_PRICING: dict[str, dict[str, float]] = {
     # Z.AI GLM models (official pricing from docs.z.ai)
     "glm-5.1":        {"input": 1.40, "output": 4.40},
@@ -179,6 +180,10 @@ MODEL_PRICING: dict[str, dict[str, float]] = {
     "minimax-m2.7-highspeed": {"input": 0.30, "output": 2.40},
     "minimax-m2.5":           {"input": 0.15, "output": 1.20},
     "minimax-m2.1":           {"input": 0.30, "output": 1.20},
+    # Xiaomi MiMo models (pay-as-you-go pricing, Token Plan uses credits)
+    "mimo-v2.5-pro": {"input": 1.00, "output": 3.00},
+    "mimo-v2.5":     {"input": 0.40, "output": 1.20},
+    "mimo-v2-pro":   {"input": 1.00, "output": 3.00},
 }
 
 
