@@ -266,10 +266,13 @@ claude() {
       export ANTHROPIC_BASE_URL=https://token-plan-ams.xiaomimimo.com/anthropic
       export ANTHROPIC_AUTH_TOKEN="$key"
       export API_TIMEOUT_MS=3000000
-      export ANTHROPIC_MODEL=mimo-v2.5-pro
-      export ANTHROPIC_DEFAULT_OPUS_MODEL=mimo-v2.5-pro
-      export ANTHROPIC_DEFAULT_SONNET_MODEL=mimo-v2.5-pro
-      export ANTHROPIC_DEFAULT_HAIKU_MODEL=mimo-v2.5-pro
+      # [1m] suffix: Claude Code strips it before sending to provider, but
+      # unlocks 1M context window handling (compaction threshold, token budget).
+      # MiMo-V2.5-Pro supports 1M natively.
+      export ANTHROPIC_MODEL='mimo-v2.5-pro[1m]'
+      export ANTHROPIC_DEFAULT_OPUS_MODEL='mimo-v2.5-pro[1m]'
+      export ANTHROPIC_DEFAULT_SONNET_MODEL='mimo-v2.5-pro[1m]'
+      export ANTHROPIC_DEFAULT_HAIKU_MODEL='mimo-v2.5-pro[1m]'
       ;;
     off)
       # Full Anthropic — nothing to configure
@@ -283,6 +286,18 @@ claude() {
       export ANTHROPIC_BASE_URL=http://localhost:8082
       export API_TIMEOUT_MS=3000000
       _apply_caching_directives "$state"
+      # Activate 1M context on Sonnet tier when provider supports it.
+      # Claude Code strips [1m] before sending; proxy sees "claude-sonnet-4-6"
+      # and routes to provider per mode config. Compaction threshold jumps
+      # from 200K to 1M.
+      case "$state" in
+        mimo|mix)
+          # Sonnet → MiMo-V2.5-Pro (1M native) via proxy
+          export ANTHROPIC_DEFAULT_SONNET_MODEL='claude-sonnet-4-6[1m]'
+          ;;
+      esac
+      # Haiku kept at default 200K: MiniMax M2.7 caps at ~200K via API and
+      # Claude Code doesn't accept [1m] on Haiku family.
       ;;
   esac
 
@@ -381,15 +396,17 @@ proxy-status() {
       ;;
     mix)
       echo "  Mode:    SPLIT GLOBAL (MiMo + MiniMax)"
-      echo "  Sonnet -> Xiaomi MiMo-V2.5-Pro  (intelligence, caching active)"
-      echo "  Haiku  -> MiniMax M2.7          (vitesse, caching active)"
-      echo "  Opus   -> Anthropic OAuth"
+      echo "  Sonnet -> Xiaomi MiMo-V2.5-Pro  (1M context via [1m], caching)"
+      echo "  Haiku  -> MiniMax M2.7          (200K default, caching)"
+      echo "  Opus   -> Anthropic OAuth       (1M native on Max subscription)"
+      echo "  Thinking blocks: preserved in history"
       ;;
     mimo)
       echo "  Mode:    HYBRIDE MIMO"
-      echo "  Sonnet/Haiku -> Xiaomi MiMo-V2.5-Pro (proxy :8082)"
-      echo "  Opus         -> Anthropic OAuth"
-      echo "  Caching: active"
+      echo "  Sonnet -> Xiaomi MiMo-V2.5-Pro (proxy :8082, 1M context via [1m])"
+      echo "  Haiku  -> Xiaomi MiMo-V2.5-Pro (proxy :8082, 200K default)"
+      echo "  Opus   -> Anthropic OAuth (1M native)"
+      echo "  Caching: active | thinking blocks: preserved"
       ;;
     full)
       echo "  Mode:    FULL GLM"
@@ -400,7 +417,7 @@ proxy-status() {
     mimo_full)
       echo "  Mode:    FULL MIMO"
       echo "  Tout -> Xiaomi MiMo direct (https://token-plan-ams.xiaomimimo.com/anthropic)"
-      echo "  Models: opus/sonnet/haiku = mimo-v2.5-pro"
+      echo "  Models: opus/sonnet/haiku = mimo-v2.5-pro[1m]  (1M context activated)"
       echo "  Caching: active"
       ;;
     off)

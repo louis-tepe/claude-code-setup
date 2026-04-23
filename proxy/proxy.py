@@ -1031,6 +1031,11 @@ async def proxy_messages(request: Request):
     rid = short_id()
     data = await request.json()
     original_model = data.get("model", "")
+    # Defense-in-depth: Claude Code strips [1m] before sending, but if any
+    # client leaks it through, normalize before tier detection / forwarding.
+    if original_model.endswith("[1m]"):
+        original_model = original_model[:-4]
+        data["model"] = original_model
     is_streaming = data.get("stream", False)
     original_headers = dict(request.headers)
     stream_tag = "⇄" if is_streaming else "→"
@@ -1369,6 +1374,9 @@ async def proxy_count_tokens(request: Request):
     rid = short_id()
     data = await request.json()
     original_model = data.get("model", "")
+    if original_model.endswith("[1m]"):
+        original_model = original_model[:-4]
+        data["model"] = original_model
     original_headers = dict(request.headers)
 
     # Always forward to Anthropic for token counting
